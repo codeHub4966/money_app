@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/repositories/wallet_repository.dart';
 import '../../../domain/models/wallet.dart';
+import '../../../domain/models/transaction.dart';
 import '../../providers/app_providers.dart';
 
 const _types = [
@@ -45,14 +46,38 @@ class _State extends ConsumerState<AddWalletScreen> {
   Future<void> _save() async {
     final balance = double.tryParse(_amountCtrl.text) ?? 0;
     if (_nameCtrl.text.isEmpty) return;
-    await ref.read(walletRepositoryProvider).add(Wallet(
+
+    final walletRepo = ref.read(walletRepositoryProvider);
+    final txRepo = ref.read(transactionRepositoryProvider);
+
+    // If editing existing wallet, check if balance changed
+    if (widget.initialId != null && widget.initialBalance != null) {
+      final oldBalance = widget.initialBalance!;
+      final difference = balance - oldBalance;
+
+      if (difference != 0) {
+        // Create adjustment transaction
+        final now = DateTime.now();
+        await txRepo.add(Transaction(
+          id: now.microsecondsSinceEpoch.toString(),
+          type: difference > 0 ? TransactionType.income : TransactionType.expense,
+          amount: difference.abs(),
+          category: 'Balance Adjustment',
+          accountId: widget.initialId!,
+          note: 'Manual balance adjustment',
+          date: now,
+        ));
+      }
+    }
+
+    await walletRepo.add(Wallet(
       id: widget.initialId ?? DateTime.now().millisecondsSinceEpoch.toString(),
       name: _nameCtrl.text,
       type: WalletType.values.byName(_type),
       balance: balance,
       includeInTotal: _includeInTotal,
     ));
-    if (mounted) context.pop();
+    if (mounted) context.pop(true);
   }
 
   @override

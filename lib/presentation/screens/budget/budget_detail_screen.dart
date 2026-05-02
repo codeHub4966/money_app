@@ -72,9 +72,13 @@ class _BudgetDetailScreenState extends ConsumerState<BudgetDetailScreen> {
     final allCats = ref.watch(categoriesProvider);
     final emojiMap = <String, String>{};
     for (final cats in allCats.values) {
-      for (final c in cats) emojiMap[c.id] = c.emoji;
+      for (final c in cats) {
+        emojiMap[c.id] = c.emoji;
+        emojiMap[c.label] = c.emoji;
+        emojiMap[c.label.toLowerCase()] = c.emoji;
+      }
     }
-    final headerEmoji = emojiMap[name.toLowerCase()] ?? emojiMap[name];
+    final headerEmoji = emojiMap[name] ?? emojiMap[name.toLowerCase()];
     final now = DateTime.now();
     final txs = allTx.where((t) =>
         t.type == TransactionType.expense &&

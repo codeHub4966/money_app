@@ -13,8 +13,16 @@ class BudgetScreen extends ConsumerWidget {
     final budgets = ref.watch(budgetsProvider).valueOrNull ?? [];
     final allCats = ref.watch(categoriesProvider);
     final emojiMap = <String, String>{};
+    final labelMap = <String, String>{};
     for (final cats in allCats.values) {
-      for (final c in cats) emojiMap[c.id] = c.emoji;
+      for (final c in cats) {
+        emojiMap[c.id] = c.emoji;
+        emojiMap[c.label] = c.emoji;
+        emojiMap[c.label.toLowerCase()] = c.emoji;
+        labelMap[c.id] = c.label;
+        labelMap[c.label] = c.label;
+        labelMap[c.label.toLowerCase()] = c.label;
+      }
     }
 
     return Scaffold(
@@ -63,15 +71,11 @@ class BudgetScreen extends ConsumerWidget {
                 padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
                 child: _CategoryCard(
                   budget: b,
-                  emoji: emojiMap[b.categoryName.toLowerCase()] ?? emojiMap[b.categoryName],
+                  emoji: emojiMap[b.categoryName] ?? emojiMap[b.categoryName.toLowerCase()],
+                  displayName: labelMap[b.categoryName] ?? b.categoryName,
                   onTap: () => context.push('/budget/${b.categoryName}'),
                 ),
               )),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: _InsightsCard(),
-            ),
           ]),
         ),
       ),
@@ -186,8 +190,9 @@ class _Stat extends StatelessWidget {
 class _CategoryCard extends StatelessWidget {
   final Budget budget;
   final String? emoji;
+  final String displayName;
   final VoidCallback onTap;
-  const _CategoryCard({required this.budget, this.emoji, required this.onTap});
+  const _CategoryCard({required this.budget, this.emoji, required this.displayName, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -219,12 +224,12 @@ class _CategoryCard extends StatelessWidget {
               )),
             const SizedBox(width: 16),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(budget.categoryName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
+              Text(displayName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
               Text(over ? '100% OVER BUDGET' : '${(pct * 100).toStringAsFixed(2)}% USED',
                 style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 1,
                     color: over ? AppTheme.error : AppTheme.onSurfaceVariant)),
             ])),
-            Text('RM${left.toStringAsFixed(1)} ${over ? 'Over' : 'Left'}',
+            Text('RM${left.toStringAsFixed(2)} ${over ? 'Over' : 'Left'}',
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
                   color: over ? AppTheme.error : AppTheme.onSurface)),
           ]),
@@ -237,42 +242,15 @@ class _CategoryCard extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text('Used: RM${budget.spent.toStringAsFixed(1)}',
+            Text('Used: RM${budget.spent.toStringAsFixed(2)}',
               style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1,
                   color: over ? AppTheme.error : AppTheme.onSurfaceVariant)),
-            Text('Total: RM${budget.monthlyLimit.toStringAsFixed(1)}',
+            Text('Total: RM${budget.monthlyLimit.toStringAsFixed(2)}',
               style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1,
                   color: over ? AppTheme.error : AppTheme.onSurfaceVariant)),
           ]),
         ]),
       ),
-    );
-  }
-}
-
-class _InsightsCard extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Budget Insights', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
-        const SizedBox(height: 12),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(16)),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Icon(Icons.lightbulb_outline_rounded, color: AppTheme.secondary, size: 20),
-            const SizedBox(width: 12),
-            const Expanded(child: Text(
-              'Review your category budgets and adjust limits to stay on track this month.',
-              style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant, height: 1.5),
-            )),
-          ]),
-        ),
-      ]),
     );
   }
 }

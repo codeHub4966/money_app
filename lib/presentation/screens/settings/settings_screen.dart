@@ -1,9 +1,16 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/services/pin_service.dart';
 import '../../../core/services/export_service.dart';
+import '../../../core/services/backup_service.dart';
+import '../../../data/repositories/wallet_repository.dart';
+import '../../../data/repositories/budget_repository.dart';
+import '../../../domain/models/app_category.dart';
 import '../settings/pin_screen.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart';
@@ -19,10 +26,13 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _State extends ConsumerState<SettingsScreen> {
   bool _pinEnabled = false;
   bool _biometricEnabled = false;
-  String _name = 'Alexander Vance';
+  String _name = 'User';
   bool _editing = false;
-  late final _nameCtrl = TextEditingController(text: _name);
+  final _nameCtrl = TextEditingController();
   String? _savedPin;
+  String? _profileImagePath;
+  static const _profileImageKey = 'profile_image_path';
+  static const _profileNameKey = 'profile_name';
 
   @override
   void initState() {
@@ -31,6 +41,35 @@ class _State extends ConsumerState<SettingsScreen> {
       _savedPin = p;
       _pinEnabled = p != null;
     }));
+    PinService.isBiometricEnabled().then((b) => setState(() => _biometricEnabled = b));
+    SharedPreferences.getInstance().then((prefs) {
+      final path = prefs.getString(_profileImageKey);
+      final name = prefs.getString(_profileNameKey);
+      if (mounted) setState(() {
+        if (path != null) _profileImagePath = path;
+        if (name != null && name.isNotEmpty) {
+          _name = name;
+          _nameCtrl.text = name;
+        }
+      });
+    });
+  }
+
+  Future<void> _pickProfileImage() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
+    if (picked == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_profileImageKey, picked.path);
+    if (mounted) setState(() => _profileImagePath = picked.path);
+  }
+
+  Future<void> _saveName() async {
+    final name = _nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_profileNameKey, name);
+    if (mounted) setState(() { _name = name; _editing = false; });
   }
 
   void _onPinToggle(bool v) {
@@ -39,104 +78,144 @@ class _State extends ConsumerState<SettingsScreen> {
     } else {
       // Require current PIN before deleting
       Navigator.of(context, rootNavigator: true).push(
-        PageRouteBuilder(
-          opaque: true,
+        MaterialPageRoute(
           fullscreenDialog: true,
-          pageBuilder: (context, _, __) => PinScreen(
-        title: 'Current PIN',
-        subtitle: 'Enter your PIN to disable it',
-        onSuccess: (pin) {
-          if (pin != _savedPin) {
-            Navigator.pop(context);
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Incorrect PIN.')));
-            return;
-          }
-          PinService.deletePin();
-          setState(() { _savedPin = null; _pinEnabled = false; });
-          Navigator.pop(context);
+          builder: (ctx) => PinScreen(
+            title: 'Current PIN',
+            subtitle: 'Enter your PIN to disable it',
+            onSuccess: (pin) {
+              if (pin != _savedPin) {
+                Navigator.of(ctx, rootNavigator: true).pop();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Incorrect PIN.')));
+                return;
+              }
+              PinService.deletePin();
+              setState(() {
+                _savedPin = null;
+                _pinEnabled = false;
+                _biometricEnabled = false;
+              });
+              Navigator.of(ctx, rootNavigator: true).pop();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('PIN deleted.')));
+            },
+          ),
+        ),
+      );
+    }
+  }
+
+  void _onBiometricToggle(bool v) async {
+    if (v) {
+      // Check if device supports biometric
+      final canUse = await PinService.canUseBiometric();
+      if (!canUse) {
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('PIN deleted.')));
-        },
-      )));
+            const SnackBar(content: Text('Biometric authentication not available on this device.')));
+        }
+        return;
+      }
+      // Enable biometric
+      await PinService.setBiometricEnabled(true);
+      setState(() => _biometricEnabled = true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Biometric authentication enabled.')));
+      }
+    } else {
+      // Disable biometric
+      await PinService.setBiometricEnabled(false);
+      setState(() => _biometricEnabled = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Biometric authentication disabled.')));
+      }
     }
   }
 
   void _startCreatePin() {
     String? firstPin;
-    Navigator.push(context, MaterialPageRoute(
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
       fullscreenDialog: true,
-      builder: (_) => PinScreen(
-      title: 'Create PIN',
-      subtitle: 'Enter a 4-digit PIN',
-      onSuccess: (pin) {
-        firstPin = pin;
-        Navigator.pushReplacement(context, MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => PinScreen(
-          title: 'Confirm PIN',
-          subtitle: 'Re-enter your PIN to confirm',
-          onSuccess: (confirm) {
-            if (confirm == firstPin) {
-              PinService.setPin(confirm);
-              setState(() { _savedPin = confirm; _pinEnabled = true; });
-              Navigator.pop(context);
-            } else {
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('PINs do not match. Try again.')));
-              setState(() => _pinEnabled = false);
-            }
-          },
-        )));
-      },
-    )));
-  }
-
-  void _startEditPin() {
-    Navigator.push(context, MaterialPageRoute(
-      fullscreenDialog: true,
-      builder: (_) => PinScreen(
-      title: 'Current PIN',
-      subtitle: 'Enter your current PIN',
-      onSuccess: (pin) {
-        if (pin != _savedPin) {
-          Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Incorrect PIN.')));
-          return;
-        }
-        String? firstPin;
-        Navigator.pushReplacement(context, MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => PinScreen(
-          title: 'Create New PIN',
-          subtitle: 'Enter a new 4-digit PIN',
-          onSuccess: (newPin) {
-            firstPin = newPin;
-            Navigator.pushReplacement(context, MaterialPageRoute(
-              fullscreenDialog: true,
-              builder: (_) => PinScreen(
+      builder: (ctx1) => PinScreen(
+        title: 'Create PIN',
+        subtitle: 'Enter a 4-digit PIN',
+        onSuccess: (pin) {
+          firstPin = pin;
+          Navigator.of(ctx1, rootNavigator: true).pushReplacement(MaterialPageRoute(
+            fullscreenDialog: true,
+            builder: (ctx2) => PinScreen(
               title: 'Confirm PIN',
-              subtitle: 'Re-enter your new PIN',
+              subtitle: 'Re-enter your PIN to confirm',
               onSuccess: (confirm) {
                 if (confirm == firstPin) {
                   PinService.setPin(confirm);
-                  setState(() => _savedPin = confirm);
-                  Navigator.pop(context);
+                  setState(() { _savedPin = confirm; _pinEnabled = true; });
+                  Navigator.of(ctx2, rootNavigator: true).pop();
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('PIN updated successfully.')));
+                    const SnackBar(content: Text('PIN created successfully.')));
                 } else {
-                  Navigator.pop(context);
+                  Navigator.of(ctx2, rootNavigator: true).pop();
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('PINs do not match. Try again.')));
+                  setState(() => _pinEnabled = false);
                 }
               },
-            )));
-          },
-        )));
-      },
-    )));
+            ),
+          ));
+        },
+      ),
+    ));
+  }
+
+  void _startEditPin() {
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      fullscreenDialog: true,
+      builder: (ctx1) => PinScreen(
+        title: 'Current PIN',
+        subtitle: 'Enter your current PIN',
+        onSuccess: (pin) {
+          if (pin != _savedPin) {
+            Navigator.of(ctx1, rootNavigator: true).pop();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Incorrect PIN.')));
+            return;
+          }
+          String? firstPin;
+          Navigator.of(ctx1, rootNavigator: true).pushReplacement(MaterialPageRoute(
+            fullscreenDialog: true,
+            builder: (ctx2) => PinScreen(
+              title: 'Create New PIN',
+              subtitle: 'Enter a new 4-digit PIN',
+              onSuccess: (newPin) {
+                firstPin = newPin;
+                Navigator.of(ctx2, rootNavigator: true).pushReplacement(MaterialPageRoute(
+                  fullscreenDialog: true,
+                  builder: (ctx3) => PinScreen(
+                    title: 'Confirm PIN',
+                    subtitle: 'Re-enter your new PIN',
+                    onSuccess: (confirm) {
+                      Navigator.of(ctx3, rootNavigator: true).pop();
+                      if (confirm == firstPin) {
+                        PinService.setPin(confirm);
+                        setState(() => _savedPin = confirm);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('PIN updated successfully.')));
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('PINs do not match. Try again.')));
+                      }
+                    },
+                  ),
+                ));
+              },
+            ),
+          ));
+        },
+      ),
+    ));
   }
 
   @override
@@ -159,8 +238,33 @@ class _State extends ConsumerState<SettingsScreen> {
                 decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
                   boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
                 child: Row(children: [
-                  CircleAvatar(radius: 36, backgroundColor: AppTheme.surfaceContainerLow,
-                    child: const Icon(Icons.person, size: 36, color: AppTheme.onSurfaceVariant)),
+                  GestureDetector(
+                    onTap: _pickProfileImage,
+                    child: Stack(
+                      children: [
+                        CircleAvatar(
+                          radius: 36,
+                          backgroundColor: AppTheme.surfaceContainerLow,
+                          backgroundImage: _profileImagePath != null ? FileImage(File(_profileImagePath!)) : null,
+                          child: _profileImagePath == null
+                              ? const Icon(Icons.person, size: 36, color: AppTheme.onSurfaceVariant)
+                              : null,
+                        ),
+                        Positioned(
+                          bottom: 0, right: 0,
+                          child: Container(
+                            width: 22, height: 22,
+                            decoration: BoxDecoration(
+                              color: AppTheme.secondary,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: const Icon(Icons.camera_alt_rounded, size: 12, color: Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     if (_editing)
@@ -174,7 +278,7 @@ class _State extends ConsumerState<SettingsScreen> {
                     const SizedBox(height: 8),
                     GestureDetector(
                       onTap: () {
-                        if (_editing) setState(() { _name = _nameCtrl.text; _editing = false; });
+                        if (_editing) _saveName();
                         else setState(() => _editing = true);
                       },
                       child: Row(children: [
@@ -250,8 +354,8 @@ class _State extends ConsumerState<SettingsScreen> {
                   _ToggleRow(
                     title: 'Biometric Authentication',
                     subtitle: 'Use FaceID or Fingerprint to unlock',
-                    value: _biometricEnabled,
-                    onChanged: (v) => setState(() => _biometricEnabled = v),
+                    value: _biometricEnabled && _pinEnabled,
+                    onChanged: _pinEnabled ? _onBiometricToggle : null,
                   ),
                 ]),
               ),
@@ -281,6 +385,36 @@ class _State extends ConsumerState<SettingsScreen> {
                 ]),
               ),
             ),
+            const SizedBox(height: 20),
+            // Delete All Data card
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: GestureDetector(
+                onTap: () => _showDeleteAllData(context),
+                child: Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                    boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)],
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 44, height: 44,
+                      decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(14)),
+                      child: const Icon(Icons.delete_forever_rounded, color: Colors.red, size: 22),
+                    ),
+                    const SizedBox(width: 16),
+                    const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('Delete All Data', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.red)),
+                      Text('Remove all transactions, wallets and budgets', style: TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
+                    ])),
+                    const Icon(Icons.chevron_right_rounded, color: Colors.red),
+                  ]),
+                ),
+              ),
+            ),
           ]),
         ),
       ),
@@ -288,28 +422,74 @@ class _State extends ConsumerState<SettingsScreen> {
   }
 
   void _showExport(BuildContext context) {
-    final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ExportSheet(transactions: transactions),
+      isScrollControlled: true,
+      builder: (_) => _ExportSheet(
+        categories: ref.read(categoriesProvider),
+        walletOrder: ref.read(walletOrderProvider),
+        txRepo: ref.read(transactionRepositoryProvider),
+        walletRepo: ref.read(walletRepositoryProvider),
+        budgetRepo: ref.read(budgetRepositoryProvider),
+        transactions: ref.read(transactionsProvider).valueOrNull ?? [],
+      ),
     );
   }
 
   void _showImport(BuildContext context) {
-    final repo = ref.read(transactionRepositoryProvider);
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (_) => _ImportSheet(repo: repo),
+      isScrollControlled: true,
+      builder: (_) => _ImportSheet(
+        txRepo: ref.read(transactionRepositoryProvider),
+        walletRepo: ref.read(walletRepositoryProvider),
+        budgetRepo: ref.read(budgetRepositoryProvider),
+        onImported: () {
+          ref.read(categoriesProvider.notifier).reloadFromPrefs();
+          ref.read(walletOrderProvider.notifier).reloadFromPrefs();
+        },
+      ),
     );
+  }
+
+  void _showDeleteAllData(BuildContext context) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete All Data?'),
+        content: const Text('This will permanently delete all transactions, wallets, and budgets. This action cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete All'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      final db = ref.read(appDatabaseProvider);
+      await db.deleteAllData();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('All data deleted successfully.')),
+        );
+      }
+    }
   }
 }
 
 class _ToggleRow extends StatelessWidget {
   final String title, subtitle;
   final bool value;
-  final ValueChanged<bool> onChanged;
+  final ValueChanged<bool>? onChanged;
   const _ToggleRow({required this.title, required this.subtitle, required this.value, required this.onChanged});
 
   @override
@@ -347,20 +527,62 @@ class _DataBtn extends StatelessWidget {
 
 class _ExportSheet extends StatefulWidget {
   final List<Transaction> transactions;
-  const _ExportSheet({required this.transactions});
+  final Map<String, List<AppCategory>> categories;
+  final List<String> walletOrder;
+  final ITransactionRepository txRepo;
+  final IWalletRepository walletRepo;
+  final IBudgetRepository budgetRepo;
+
+  const _ExportSheet({
+    required this.transactions,
+    required this.categories,
+    required this.walletOrder,
+    required this.txRepo,
+    required this.walletRepo,
+    required this.budgetRepo,
+  });
 
   @override
   State<_ExportSheet> createState() => _ExportSheetState();
 }
 
 class _ExportSheetState extends State<_ExportSheet> {
-  String _format = 'csv';
+  String _format = 'json';
+  bool _loading = false;
+  String? _message;
+  bool _isError = false;
+
+  Future<void> _run() async {
+    setState(() { _loading = true; _message = null; _isError = false; });
+    try {
+      if (_format == 'json') {
+        await BackupService.exportBackup(
+          txRepo: widget.txRepo,
+          walletRepo: widget.walletRepo,
+          budgetRepo: widget.budgetRepo,
+          categories: widget.categories,
+          walletOrder: widget.walletOrder,
+        );
+        setState(() { _message = '✅ Backup file shared!'; _isError = false; });
+      } else if (_format == 'csv') {
+        await ExportService.exportCsv(widget.transactions);
+        setState(() { _message = '✅ CSV exported!'; _isError = false; });
+      } else {
+        await ExportService.exportPdf(widget.transactions);
+        setState(() { _message = '✅ PDF exported!'; _isError = false; });
+      }
+    } catch (e) {
+      setState(() { _message = '❌ $e'; _isError = true; });
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Center(child: Container(width: 48, height: 5,
           decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(3)))),
@@ -373,31 +595,35 @@ class _ExportSheetState extends State<_ExportSheet> {
               child: const Icon(Icons.close_rounded, size: 18))),
         ]),
         const SizedBox(height: 20),
+        _FormatCard(
+          id: 'json', icon: Icons.backup_rounded, iconBg: AppTheme.secondary,
+          title: 'Full Backup (JSON)', sub: 'All data: wallets, budgets, categories & settings. Use this to restore on a new device.',
+          selected: _format == 'json', onTap: () => setState(() => _format = 'json')),
+        const SizedBox(height: 10),
         _FormatCard(id: 'csv', icon: Icons.table_chart_rounded, iconBg: AppTheme.primary,
-          title: 'CSV Format', sub: 'Raw data for spreadsheets.',
+          title: 'CSV – Transactions only', sub: 'Raw data for spreadsheets.',
           selected: _format == 'csv', onTap: () => setState(() => _format = 'csv')),
-        const SizedBox(height: 12),
-        _FormatCard(id: 'pdf', icon: Icons.picture_as_pdf_rounded, iconBg: AppTheme.surfaceContainerHigh,
-          title: 'PDF Report', sub: 'Formatted visual report.',
+        const SizedBox(height: 10),
+        _FormatCard(id: 'pdf', icon: Icons.picture_as_pdf_rounded, iconBg: const Color(0xFFEF4444),
+          title: 'PDF – Transactions only', sub: 'Formatted visual report.',
           selected: _format == 'pdf', onTap: () => setState(() => _format = 'pdf')),
-        const SizedBox(height: 24),
+        if (_message != null) ...[const SizedBox(height: 14),
+          _ResultBanner(message: _message!, isError: _isError)],
+        const SizedBox(height: 20),
         GestureDetector(
-          onTap: () {
-            Navigator.pop(context);
-            if (_format == 'csv') {
-              ExportService.exportCsv(widget.transactions);
-            } else {
-              ExportService.exportPdf(widget.transactions);
-            }
-          },
+          onTap: _loading ? null : _run,
           child: Container(height: 56, width: double.infinity,
-            decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
+            decoration: BoxDecoration(color: _loading ? AppTheme.primary.withOpacity(0.5) : AppTheme.primary,
+              borderRadius: BorderRadius.circular(24),
               boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 8))]),
-            child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(Icons.download_rounded, color: Colors.white, size: 20),
-              SizedBox(width: 8),
-              Text('EXPORT DATA', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
-            ])),
+            child: Center(child: _loading
+              ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
+              : const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.download_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 8),
+                  Text('EXPORT', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                ])),
+          ),
         ),
       ]),
     );
@@ -405,58 +631,89 @@ class _ExportSheetState extends State<_ExportSheet> {
 }
 
 class _ImportSheet extends StatefulWidget {
-  final ITransactionRepository repo;
-  const _ImportSheet({required this.repo});
+  final ITransactionRepository txRepo;
+  final IWalletRepository walletRepo;
+  final IBudgetRepository budgetRepo;
+  final VoidCallback onImported;
+  const _ImportSheet({
+    required this.txRepo,
+    required this.walletRepo,
+    required this.budgetRepo,
+    required this.onImported,
+  });
 
   @override
   State<_ImportSheet> createState() => _ImportSheetState();
 }
 
 class _ImportSheetState extends State<_ImportSheet> {
-  String _format = 'csv';
+  bool _loading = false;
+  String? _message;
+  bool _isError = false;
+
+  Future<void> _run() async {
+    setState(() { _loading = true; _message = null; _isError = false; });
+    try {
+      final summary = await BackupService.importBackup(
+        txRepo: widget.txRepo,
+        walletRepo: widget.walletRepo,
+        budgetRepo: widget.budgetRepo,
+      );
+      widget.onImported();
+      setState(() { _message = '✅ Import successful!\n$summary'; _isError = false; });
+    } catch (e) {
+      setState(() { _message = '❌ $e'; _isError = true; });
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Center(child: Container(width: 48, height: 5,
           decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(3)))),
         const SizedBox(height: 16),
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          const Text('Import Data', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+          const Text('Import Backup', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
           GestureDetector(onTap: () => Navigator.pop(context),
             child: Container(width: 36, height: 36, decoration: BoxDecoration(
                 color: AppTheme.surfaceContainerLow, shape: BoxShape.circle),
               child: const Icon(Icons.close_rounded, size: 18))),
         ]),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(16)),
+          child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(Icons.info_outline_rounded, color: AppTheme.secondary, size: 20),
+            SizedBox(width: 10),
+            Expanded(child: Text(
+              'Select a .json backup file exported from this app. All wallets, budgets, categories, and transactions will be merged into your current data.',
+              style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant, height: 1.45),
+            )),
+          ]),
+        ),
+        if (_message != null) ...[const SizedBox(height: 14),
+          _ResultBanner(message: _message!, isError: _isError)],
         const SizedBox(height: 20),
-        _FormatCard(id: 'csv', icon: Icons.table_chart_rounded, iconBg: AppTheme.primary,
-          title: 'CSV Format', sub: 'Import from spreadsheet export.',
-          selected: _format == 'csv', onTap: () => setState(() => _format = 'csv')),
-        const SizedBox(height: 12),
-        _FormatCard(id: 'pdf', icon: Icons.picture_as_pdf_rounded, iconBg: AppTheme.surfaceContainerHigh,
-          title: 'PDF Report', sub: 'Import from PDF export.',
-          selected: _format == 'pdf', onTap: () => setState(() => _format = 'pdf')),
-        const SizedBox(height: 24),
         GestureDetector(
-          onTap: () {
-            Navigator.pop(context);
-            if (_format == 'csv') {
-              ExportService.importCsv(widget.repo);
-            } else {
-              ExportService.importPdf(widget.repo);
-            }
-          },
+          onTap: _loading ? null : _run,
           child: Container(height: 56, width: double.infinity,
-            decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
+            decoration: BoxDecoration(color: _loading ? AppTheme.primary.withOpacity(0.5) : AppTheme.primary,
+              borderRadius: BorderRadius.circular(24),
               boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 8))]),
-            child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(Icons.upload_rounded, color: Colors.white, size: 20),
-              SizedBox(width: 8),
-              Text('IMPORT DATA', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
-            ])),
+            child: Center(child: _loading
+              ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
+              : const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.upload_rounded, color: Colors.white, size: 20),
+                  SizedBox(width: 8),
+                  Text('SELECT BACKUP FILE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                ])),
+          ),
         ),
       ]),
     );
@@ -494,6 +751,34 @@ class _FormatCard extends StatelessWidget {
           decoration: const BoxDecoration(color: AppTheme.secondary, shape: BoxShape.circle),
           child: const Icon(Icons.check, color: Colors.white, size: 14)),
       ]),
+    ),
+  );
+}
+
+class _ResultBanner extends StatelessWidget {
+  final String message;
+  final bool isError;
+  const _ResultBanner({required this.message, required this.isError});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: isError ? Colors.red.withOpacity(0.08) : const Color(0xFF14B8A6).withOpacity(0.08),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(
+        color: isError ? Colors.red.withOpacity(0.3) : const Color(0xFF14B8A6).withOpacity(0.3),
+      ),
+    ),
+    child: Text(
+      message,
+      style: TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        color: isError ? Colors.red : const Color(0xFF0D9488),
+        height: 1.5,
+      ),
     ),
   );
 }

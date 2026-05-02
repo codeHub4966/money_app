@@ -123,6 +123,8 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
     _persist();
   }
 
+  Future<void> reloadFromPrefs() => _load();
+
   Future<void> remove(String type, String id, WidgetRef ref) async {
     // Check if category is in use
     final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
@@ -193,6 +195,8 @@ class WalletOrderNotifier extends StateNotifier<List<String>> {
     state = ids;
     _persist();
   }
+
+  Future<void> reloadFromPrefs() => _load();
 }
 
 final walletOrderProvider =

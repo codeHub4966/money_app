@@ -22,6 +22,7 @@ class _State extends ConsumerState<AddBudgetScreen> {
   @override
   void initState() {
     super.initState();
+    // initialCategory may be a label (for edit) — store as-is
     _selectedId = widget.initialCategory;
     _amount = widget.initialLimit?.toStringAsFixed(0) ?? '';
   }
@@ -47,7 +48,7 @@ class _State extends ConsumerState<AddBudgetScreen> {
     if (limit == null || limit <= 0 || _selectedId == null) return;
     await ref.read(budgetRepositoryProvider).add(Budget(
       id: widget.initialId ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      categoryName: _selectedId!,
+      categoryName: _selectedId!, // stored as label
       monthlyLimit: limit,
       spent: 0,
     ));
@@ -84,9 +85,9 @@ class _State extends ConsumerState<AddBudgetScreen> {
                 childAspectRatio: 0.85,
                 children: ref.watch(categoriesProvider)['expense']!.asMap().entries.map((entry) {
                   final cat = entry.value;
-                  final selected = _selectedId == cat.id;
+                  final selected = _selectedId == cat.label;
                   return GestureDetector(
-                    onTap: () => setState(() => _selectedId = cat.id),
+                    onTap: () => setState(() => _selectedId = cat.label),
                     child: Column(children: [
                       Container(
                         width: 64, height: 64,
@@ -108,12 +109,15 @@ class _State extends ConsumerState<AddBudgetScreen> {
               ),
             ]),
           )),
-          if (_selectedId != null) GestureDetector(
-            onVerticalDragEnd: (d) {
-              if (d.primaryVelocity != null && d.primaryVelocity! > 300) setState(() => _selectedId = null);
-            },
-            child: _NumberPad(amount: _amount, label: _selectedId!, onKey: _onKey, onDone: _save),
-          ),
+          if (_selectedId != null) Builder(builder: (context) {
+            // _selectedId is now the label directly
+            return GestureDetector(
+              onVerticalDragEnd: (d) {
+                if (d.primaryVelocity != null && d.primaryVelocity! > 300) setState(() => _selectedId = null);
+              },
+              child: _NumberPad(amount: _amount, label: _selectedId!, onKey: _onKey, onDone: _save),
+            );
+          }),
         ]),
       ),
     );

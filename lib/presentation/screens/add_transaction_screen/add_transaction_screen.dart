@@ -36,7 +36,17 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     super.initState();
     final t = widget.transaction;
     _type = t?.type ?? TransactionType.expense;
-    _account = t?.accountId ?? 'cash';
+
+    // Default to the transaction's account, or pick the first real wallet
+    if (t?.accountId != null) {
+      _account = t!.accountId;
+    } else {
+      final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+      final orderNotifier = ref.read(walletOrderProvider.notifier);
+      final sorted = orderNotifier.sort(wallets, (w) => w.id);
+      _account = sorted.isNotEmpty ? sorted.first.id : '';
+    }
+
     _amountCtrl = TextEditingController(text: t != null ? t.amount.toStringAsFixed(2) : '');
     _noteCtrl = TextEditingController(text: t?.note ?? '');
     _date = t?.date ?? DateTime.now();
@@ -47,7 +57,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     } else {
       final key = _type == TransactionType.income ? 'income' : 'expense';
       final cats = ref.read(categoriesProvider)[key] ?? [];
-      _category = cats.isNotEmpty ? cats.first.id : '';
+      _category = cats.isNotEmpty ? cats.first.label : '';
     }
   }
 
@@ -57,13 +67,22 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   Future<void> _save() async {
     final amount = double.tryParse(_amountCtrl.text);
     if (amount == null || amount <= 0) return;
+
+    // Block save if no wallet selected
+    final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+    final wallet = wallets.where((w) => w.id == _account).firstOrNull;
+    if (wallet == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a wallet first.')),
+      );
+      return;
+    }
+
     setState(() => _saving = true);
     final txRepo = ref.read(transactionRepositoryProvider);
     final walletRepo = ref.read(walletRepositoryProvider);
-    final wallets = ref.read(walletsProvider).valueOrNull ?? [];
-    final wallet = wallets.where((w) => w.id == _account).firstOrNull;
 
-    double newBalance = wallet?.balance ?? 0;
+    double newBalance = wallet.balance;
     if (widget.transaction != null) {
       final old = widget.transaction!;
       newBalance += old.type == TransactionType.income ? -old.amount : old.amount;
@@ -80,11 +99,9 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       date: _date,
     ));
 
-    if (wallet != null) {
-      await walletRepo.add(Wallet(
-          id: wallet.id, name: wallet.name, type: wallet.type,
-          balance: newBalance, includeInTotal: wallet.includeInTotal));
-    }
+    await walletRepo.add(Wallet(
+        id: wallet.id, name: wallet.name, type: wallet.type,
+        balance: newBalance, includeInTotal: wallet.includeInTotal));
 
     if (mounted) context.pop();
   }
@@ -95,8 +112,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     final cats = _cats(allCats);
 
     // Ensure _category is valid for the current type
-    if (cats.isNotEmpty && !cats.any((c) => c.id == _category)) {
-      _category = cats.first.id;
+    if (cats.isNotEmpty && !cats.any((c) => c.label == _category)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _category = cats.first.label);
+      });
     }
 
     return Scaffold(
@@ -175,7 +194,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             final cats = allCats[key] ?? [];
             setState(() {
               _type = t;
-              _category = cats.isNotEmpty ? cats.first.id : '';
+              _category = cats.isNotEmpty ? cats.first.label : '';
             });
           },
           child: AnimatedContainer(
@@ -293,82 +312,14 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   }
 
   void _showAccountSheet(List<Wallet> wallets) {
-    // Local reorderable copy for the sheet
-    final sheetWallets = wallets.toList();
-
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          return Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-            ),
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              // Handle
-              Center(child: Container(
-                width: 48, height: 5,
-                decoration: BoxDecoration(
-                  color: AppTheme.surfaceContainerLow,
-                  borderRadius: BorderRadius.circular(3),
-                ),
-              )),
-              const SizedBox(height: 16),
-              const Text('Select Account',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700,
-                      color: AppTheme.onSurface)),
-              const SizedBox(height: 4),
-              Text('Long-press to reorder',
-                  style: TextStyle(fontSize: 12,
-                      color: AppTheme.onSurfaceVariant.withValues(alpha: 0.7))),
-              const SizedBox(height: 16),
-              if (sheetWallets.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Text('No wallets found. Add one in the Wallet tab.',
-                      style: TextStyle(color: AppTheme.onSurfaceVariant),
-                      textAlign: TextAlign.center),
-                )
-              else
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.5,
-                  ),
-                  child: ReorderableListView.builder(
-                    shrinkWrap: true,
-                    itemCount: sheetWallets.length,
-                    onReorder: (oldIndex, newIndex) {
-                      if (newIndex > oldIndex) newIndex--;
-                      final item = sheetWallets.removeAt(oldIndex);
-                      sheetWallets.insert(newIndex, item);
-                      // Persist the new order immediately
-                      ref.read(walletOrderProvider.notifier)
-                          .saveOrder(sheetWallets.map((w) => w.id).toList());
-                      setSheet(() {});
-                    },
-                    itemBuilder: (_, i) {
-                      final w = sheetWallets[i];
-                      final isSelected = _account == w.id;
-                      return _AccountSheetTile(
-                        key: ValueKey(w.id),
-                        wallet: w,
-                        emoji: _walletEmoji(w.type),
-                        isSelected: isSelected,
-                        onTap: () {
-                          setState(() => _account = w.id);
-                          Navigator.pop(ctx);
-                        },
-                      );
-                    },
-                  ),
-                ),
-            ]),
-          );
-        },
+      builder: (ctx) => _AccountSheet(
+        initialSelectedId: _account,
+        walletEmoji: _walletEmoji,
+        onSelect: (id) => setState(() => _account = id),
       ),
     );
   }
@@ -420,10 +371,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         }
 
         final cat = visible[i];
-        final selected = _category == cat.id;
+        final selected = _category == cat.label;
         final bg = _kBgColors[i % _kBgColors.length];
         return GestureDetector(
-          onTap: () => setState(() => _category = cat.id),
+          onTap: () => setState(() => _category = cat.label),
           child: Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -494,11 +445,11 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
               itemBuilder: (_, i) {
                 final cat = moreCats[i];
                 final catIndex = allCats.indexOf(cat);
-                final selected = _category == cat.id;
+                final selected = _category == cat.label;
                 final bg = _kBgColors[catIndex % _kBgColors.length];
                 return GestureDetector(
                   onTap: () {
-                    setState(() => _category = cat.id);
+                    setState(() => _category = cat.label);
                     Navigator.pop(ctx);
                   },
                   child: Container(
@@ -632,12 +583,14 @@ class _AccountSheetTile extends StatelessWidget {
   final Wallet wallet;
   final String emoji;
   final bool isSelected;
+  final bool isDefault;
   final VoidCallback onTap;
   const _AccountSheetTile({
     super.key,
     required this.wallet,
     required this.emoji,
     required this.isSelected,
+    this.isDefault = false,
     required this.onTap,
   });
 
@@ -670,11 +623,26 @@ class _AccountSheetTile extends StatelessWidget {
           ),
           const SizedBox(width: 14),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(wallet.name,
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: isSelected ? AppTheme.secondary : AppTheme.onSurface)),
+            Row(children: [
+              Text(wallet.name,
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: isSelected ? AppTheme.secondary : AppTheme.onSurface)),
+              if (isDefault) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppTheme.secondary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text('Default',
+                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
+                          color: AppTheme.secondary, letterSpacing: 0.5)),
+                ),
+              ],
+            ]),
             Text('RM ${wallet.balance.toStringAsFixed(2)}',
                 style: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
           ])),
@@ -707,5 +675,109 @@ class _AttachBtn extends StatelessWidget {
       Text(label, style: const TextStyle(
           fontSize: 14, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
     ]);
+  }
+}
+
+// ── Account selection bottom sheet — watches providers directly for live reorder ──
+
+class _AccountSheet extends ConsumerStatefulWidget {
+  final String initialSelectedId;
+  final String Function(WalletType?) walletEmoji;
+  final void Function(String) onSelect;
+  const _AccountSheet({
+    required this.initialSelectedId,
+    required this.walletEmoji,
+    required this.onSelect,
+  });
+
+  @override
+  ConsumerState<_AccountSheet> createState() => _AccountSheetState();
+}
+
+class _AccountSheetState extends ConsumerState<_AccountSheet> {
+  late String _selectedId;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedId = widget.initialSelectedId;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rawWallets = ref.watch(walletsProvider).valueOrNull ?? <Wallet>[];
+    final orderNotifier = ref.watch(walletOrderProvider.notifier);
+    // Use a local mutable list that stays in sync with the provider order
+    final wallets = orderNotifier.sort(rawWallets, (w) => w.id);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Center(child: Container(
+          width: 48, height: 5,
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        )),
+        const SizedBox(height: 16),
+        const Text('Select Account',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700,
+                color: AppTheme.onSurface)),
+        const SizedBox(height: 4),
+        Text('Long-press to reorder',
+            style: TextStyle(fontSize: 12,
+                color: AppTheme.onSurfaceVariant.withValues(alpha: 0.7))),
+        const SizedBox(height: 16),
+        if (wallets.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 24),
+            child: Text('No wallets found. Add one in the Wallet tab.',
+                style: TextStyle(color: AppTheme.onSurfaceVariant),
+                textAlign: TextAlign.center),
+          )
+        else
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.5,
+            ),
+            child: ReorderableListView.builder(
+              shrinkWrap: true,
+              itemCount: wallets.length,
+              onReorder: (oldIndex, newIndex) {
+                if (newIndex > oldIndex) newIndex--;
+                final reordered = wallets.toList();
+                final item = reordered.removeAt(oldIndex);
+                reordered.insert(newIndex, item);
+                ref.read(walletOrderProvider.notifier)
+                    .saveOrder(reordered.map((w) => w.id).toList());
+                // setState triggers rebuild which re-reads provider
+                setState(() {});
+              },
+              itemBuilder: (_, i) {
+                final w = wallets[i];
+                final isSelected = _selectedId == w.id;
+                final isDefault = i == 0;
+                return _AccountSheetTile(
+                  key: ValueKey(w.id),
+                  wallet: w,
+                  emoji: widget.walletEmoji(w.type),
+                  isSelected: isSelected,
+                  isDefault: isDefault,
+                  onTap: () {
+                    _selectedId = w.id;
+                    widget.onSelect(w.id);
+                    Navigator.pop(context);
+                  },
+                );
+              },
+            ),
+          ),
+      ]),
+    );
   }
 }

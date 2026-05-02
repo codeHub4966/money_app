@@ -61,6 +61,7 @@ class _State extends ConsumerState<TransferFundsScreen> {
   void _showPicker(bool isFrom, List<Wallet> wallets) {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _WalletSheet(
         wallets: wallets,
@@ -251,7 +252,10 @@ class _WalletSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final targetHeight = MediaQuery.of(context).size.height * 0.6;
+
     return Container(
+      height: targetHeight,
       decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(40))),
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -260,38 +264,45 @@ class _WalletSheet extends StatelessWidget {
         const SizedBox(height: 16),
         const Text('Choose wallet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
         const SizedBox(height: 16),
-        // Select None
-        ListTile(
-          onTap: () { onSelect(null); Navigator.pop(context); },
-          leading: Container(width: 48, height: 48, decoration: BoxDecoration(
-              color: Colors.red.withOpacity(0.1), borderRadius: BorderRadius.circular(16)),
-            child: const Icon(Icons.block_rounded, color: Colors.red)),
-          title: const Text('Select None', style: TextStyle(fontWeight: FontWeight.w700)),
+
+        Expanded(
+          child: ListView(shrinkWrap: true, children: [
+
+            // Select None
+            ListTile(
+                onTap: () { onSelect(null); Navigator.pop(context); },
+                leading: Container(width: 48, height: 48, decoration: BoxDecoration(color: Colors.red.withOpacity(0.1), borderRadius: BorderRadius.circular(16)),
+                child: const Icon(Icons.block_rounded, color: Colors.red)),
+                title: const Text('Select None', style: TextStyle(fontWeight: FontWeight.w700)),
+            ),
+
+            ...wallets.map((w) {
+              final sel = w.id == selectedId;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: sel ? AppTheme.secondary.withOpacity(0.05) : Colors.transparent,
+                  borderRadius: BorderRadius.circular(16),
+                  border: sel ? Border.all(color: AppTheme.secondary.withOpacity(0.3)) : null,
+                ),
+
+                child: ListTile(
+                  onTap: () { onSelect(w.id); Navigator.pop(context); },
+                  leading: Container(width: 48, height: 48, decoration: BoxDecoration(
+                      color: AppTheme.secondary.withOpacity(0.1), borderRadius: BorderRadius.circular(16)),
+                    child: const Icon(Icons.account_balance_wallet_rounded, color: AppTheme.secondary)),
+                  title: Text(w.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+                  subtitle: Text('Balance RM${w.balance.toStringAsFixed(0)}'),
+                  trailing: sel
+                    ? Container(width: 24, height: 24, decoration: const BoxDecoration(color: AppTheme.secondary, shape: BoxShape.circle),
+                        child: const Icon(Icons.check, color: Colors.white, size: 14))
+                  : Container(width: 24, height: 24, decoration: BoxDecoration(
+                      shape: BoxShape.circle, border: Border.all(color: AppTheme.onSurfaceVariant.withOpacity(0.4)))),
+                ),
+              );
+            }),
+          ]),
         ),
-        ...wallets.map((w) {
-          final sel = w.id == selectedId;
-          return Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            decoration: BoxDecoration(
-              color: sel ? AppTheme.secondary.withOpacity(0.05) : Colors.transparent,
-              borderRadius: BorderRadius.circular(16),
-              border: sel ? Border.all(color: AppTheme.secondary.withOpacity(0.3)) : null,
-            ),
-            child: ListTile(
-              onTap: () { onSelect(w.id); Navigator.pop(context); },
-              leading: Container(width: 48, height: 48, decoration: BoxDecoration(
-                  color: AppTheme.secondary.withOpacity(0.1), borderRadius: BorderRadius.circular(16)),
-                child: const Icon(Icons.account_balance_wallet_rounded, color: AppTheme.secondary)),
-              title: Text(w.name, style: const TextStyle(fontWeight: FontWeight.w700)),
-              subtitle: Text('Balance RM${w.balance.toStringAsFixed(0)}'),
-              trailing: sel
-                ? Container(width: 24, height: 24, decoration: const BoxDecoration(color: AppTheme.secondary, shape: BoxShape.circle),
-                    child: const Icon(Icons.check, color: Colors.white, size: 14))
-                : Container(width: 24, height: 24, decoration: BoxDecoration(
-                    shape: BoxShape.circle, border: Border.all(color: AppTheme.onSurfaceVariant.withOpacity(0.4)))),
-            ),
-          );
-        }),
         const SizedBox(height: 8),
         GestureDetector(
           onTap: () => Navigator.pop(context),

@@ -85,11 +85,19 @@ class _ReceiptCard extends ConsumerWidget {
     }
     final emoji = transaction != null ? emojiMap[transaction!.category] : null;
 
+    final excludedWalletIds = ref.watch(walletsProvider).valueOrNull?.where((w) => !w.includeInTotal).map((w) => w.id).toSet() ?? {};
+    final isExcluded = transaction != null && excludedWalletIds.contains(transaction!.accountId);
+
     final isIncome = transaction?.type == TransactionType.income;
-    final amountColor = isIncome ? const Color(0xFF14B8A6) : AppTheme.error;
-    final amountStr = isIncome
-        ? '+RM${transaction?.amount.toStringAsFixed(2) ?? '100.00'}'
-        : '-RM${transaction?.amount.toStringAsFixed(2) ?? '100.00'}';
+    final isTransfer = transaction?.category == 'Transfer';
+    final amountColor = isTransfer ? AppTheme.secondary : (isIncome ? const Color(0xFF14B8A6) : AppTheme.error);
+    final amountStr = isTransfer
+        ? 'RM${transaction?.amount.toStringAsFixed(2) ?? '0.00'}'
+        : isIncome
+            ? '+RM${transaction?.amount.toStringAsFixed(2) ?? '0.00'}'
+            : '-RM${transaction?.amount.toStringAsFixed(2) ?? '0.00'}';
+
+    final typeDisplay = isTransfer ? 'Transfer' : (isExcluded ? 'Record' : (transaction?.type.name ?? 'income'));
 
     return Container(
       decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
@@ -140,29 +148,35 @@ class _ReceiptCard extends ConsumerWidget {
             _DetailRow(icon: Icons.grid_view_rounded, label: 'Type',
               value: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                 decoration: BoxDecoration(color: amountColor.withOpacity(0.1), borderRadius: BorderRadius.circular(8)),
-                child: Text(transaction?.type.name ?? 'income',
+                child: Text(typeDisplay,
                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: amountColor)))),
             const SizedBox(height: 20),
-            _DetailRow(icon: Icons.account_balance_wallet_rounded, label: 'Account',
-              value: Text(transaction?.accountId ?? 'Cash',
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface))),
+            if (isTransfer)
+              _DetailRow(icon: Icons.swap_horiz_rounded, label: 'Transfer',
+                value: Text(transaction?.note ?? '',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface)))
+            else
+              _DetailRow(icon: Icons.account_balance_wallet_rounded, label: 'Account',
+                value: Text(transaction?.accountId ?? 'Cash',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface))),
             const SizedBox(height: 20),
             _DetailRow(icon: Icons.calendar_today_rounded, label: 'Date',
               value: Text(_formatDate(transaction?.date ?? DateTime.now()),
                 textAlign: TextAlign.right,
                 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface))),
             const SizedBox(height: 20),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                const Icon(Icons.description_outlined, size: 20, color: AppTheme.onSurfaceVariant),
-                const SizedBox(width: 12),
-                const Text('Note', style: TextStyle(fontSize: 15, color: AppTheme.onSurfaceVariant)),
+            if (!isTransfer)
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  const Icon(Icons.description_outlined, size: 20, color: AppTheme.onSurfaceVariant),
+                  const SizedBox(width: 12),
+                  const Text('Note', style: TextStyle(fontSize: 15, color: AppTheme.onSurfaceVariant)),
+                ]),
+                const SizedBox(height: 8),
+                Padding(padding: const EdgeInsets.only(left: 32),
+                  child: Text(transaction?.note ?? '',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface))),
               ]),
-              const SizedBox(height: 8),
-              Padding(padding: const EdgeInsets.only(left: 32),
-                child: Text(transaction?.note ?? '',
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.onSurface))),
-            ]),
           ]),
         ),
         const SizedBox(height: 32),

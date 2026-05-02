@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart' as tx;
@@ -18,21 +20,29 @@ class HomeScreen extends ConsumerWidget {
 
     final now = DateTime.now();
     final monthTx = transactions.where((t) => t.date.year == now.year && t.date.month == now.month);
-    final income = monthTx.where((t) => t.type == tx.TransactionType.income).fold(0.0, (s, t) => s + t.amount);
-    final expense = monthTx.where((t) => t.type == tx.TransactionType.expense).fold(0.0, (s, t) => s + t.amount);
-    // Total balance = sum of wallets included in total - all-time expenses
-    final walletTotal = wallets.where((w) => w.includeInTotal).fold(0.0, (s, w) => s + w.balance);
-    final allExpense = transactions.where((t) => t.type == tx.TransactionType.expense).fold(0.0, (s, t) => s + t.amount);
-    final totalBalance = walletTotal - allExpense;
+
+    // Wallets excluded from total — their transactions don't count toward income/expense
+    final excludedWalletIds = wallets.where((w) => !w.includeInTotal).map((w) => w.id).toSet();
+
+    final income = monthTx
+        .where((t) => t.type == tx.TransactionType.income && t.category != 'Transfer' && !excludedWalletIds.contains(t.accountId))
+        .fold(0.0, (s, t) => s + t.amount);
+    final expense = monthTx
+        .where((t) => t.type == tx.TransactionType.expense && t.category != 'Transfer' && !excludedWalletIds.contains(t.accountId))
+        .fold(0.0, (s, t) => s + t.amount);
+    // Total balance = sum of all wallet balances included in total
+    final totalBalance = wallets.where((w) => w.includeInTotal).fold(0.0, (s, w) => s + w.balance);
     final totalBudget = budgets.fold(0.0, (s, b) => s + b.monthlyLimit);
     final totalSpent = budgets.fold(0.0, (s, b) => s + b.spent);
     final budgetPct = totalBudget > 0 ? (totalSpent / totalBudget).clamp(0.0, 1.0) : 0.0;
 
-    // Build a flat emoji lookup: categoryId -> emoji
+    // Build a flat emoji lookup: categoryId AND label -> emoji
     final emojiMap = <String, String>{};
     for (final cats in allCats.values) {
       for (final c in cats) {
         emojiMap[c.id] = c.emoji;
+        emojiMap[c.label] = c.emoji;
+        emojiMap[c.label.toLowerCase()] = c.emoji;
       }
     }
 
@@ -53,6 +63,7 @@ class HomeScreen extends ConsumerWidget {
               _RecentActivity(
                 transactions: transactions,
                 emojiMap: emojiMap,
+                excludedWalletIds: excludedWalletIds,
                 onTap: (t) => context.push('/transaction-details', extra: t),
               ),
             ],
@@ -63,20 +74,47 @@ class HomeScreen extends ConsumerWidget {
   }
 }
 
-class _Header extends StatelessWidget {
+class _Header extends StatefulWidget {
+  @override
+  State<_Header> createState() => _HeaderState();
+}
+
+class _HeaderState extends State<_Header> {
+  String? _profileImagePath;
+  String _profileName = 'Welcome';
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((prefs) {
+      final path = prefs.getString('profile_image_path');
+      final name = prefs.getString('profile_name');
+      if (mounted) setState(() {
+        if (path != null) _profileImagePath = path;
+        if (name != null && name.isNotEmpty) _profileName = name;
+      });
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
       child: Row(
         children: [
-          CircleAvatar(radius: 24, backgroundColor: AppTheme.surfaceContainerLow,
-            child: const Icon(Icons.person, color: AppTheme.onSurfaceVariant)),
+          CircleAvatar(
+            radius: 24,
+            backgroundColor: AppTheme.surfaceContainerLow,
+            backgroundImage: _profileImagePath != null ? FileImage(File(_profileImagePath!)) : null,
+            child: _profileImagePath == null
+                ? const Icon(Icons.person, color: AppTheme.onSurfaceVariant)
+                : null,
+          ),
           const SizedBox(width: 12),
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('WELCOME BACK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
                 letterSpacing: 1.5, color: AppTheme.onSurfaceVariant)),
-            const Text('Isabella', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
+            Text(_profileName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
           ]),
           const Spacer(),
           Stack(children: [
@@ -202,12 +240,30 @@ class _BudgetCard extends StatelessWidget {
 class _RecentActivity extends StatelessWidget {
   final List<tx.Transaction> transactions;
   final Map<String, String> emojiMap;
+  final Set<String> excludedWalletIds;
   final void Function(tx.Transaction) onTap;
-  const _RecentActivity({required this.transactions, required this.emojiMap, required this.onTap});
+  const _RecentActivity({required this.transactions, required this.emojiMap, required this.excludedWalletIds, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    final recent = transactions.take(5).toList();
+    // Filter out duplicate transfers - keep only one transaction per transfer
+    final filteredTx = <tx.Transaction>[];
+    final seenTransferIds = <String>{};
+
+    for (final t in transactions) {
+      if (t.category == 'Transfer') {
+        // Extract base ID (remove _out or _in suffix)
+        final baseId = t.id.replaceAll(RegExp(r'_(out|in)$'), '');
+        if (!seenTransferIds.contains(baseId)) {
+          seenTransferIds.add(baseId);
+          filteredTx.add(t);
+        }
+      } else {
+        filteredTx.add(t);
+      }
+    }
+
+    final recent = filteredTx.toList();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -248,12 +304,14 @@ class _RecentActivity extends StatelessWidget {
                 const SizedBox(width: 16),
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(t.category, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
-                  Text(t.type.name, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
+                  Text(t.category == 'Transfer' ? 'Transfer' : (excludedWalletIds.contains(t.accountId) ? 'Record' : t.type.name), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
                 ]),
                 const Spacer(),
                 Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                   Text(
-                    '${t.type == tx.TransactionType.income ? '+' : '-'}RM${t.amount.toStringAsFixed(2)}',
+                    t.category == 'Transfer'
+                        ? 'RM${t.amount.toStringAsFixed(2)}'
+                        : '${t.type == tx.TransactionType.income ? '+' : '-'}RM${t.amount.toStringAsFixed(2)}',
                     style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
                       color: t.type == tx.TransactionType.income ? const Color(0xFF14B8A6) : AppTheme.error)),
                   Text(

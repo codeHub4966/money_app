@@ -15,6 +15,14 @@ class AppDatabase extends _$AppDatabase {
 
   @override
   int get schemaVersion => 1;
+
+  Future<void> deleteAllData() async {
+    await transaction(() async {
+      await delete(transactions).go();
+      await delete(wallets).go();
+      await delete(budgets).go();
+    });
+  }
 }
 
 LazyDatabase _openConnection() {

@@ -21,6 +21,14 @@ class WalletAccountScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Fetch current wallet data from provider to ensure balance is up-to-date
+    final wallets = ref.watch(walletsProvider).valueOrNull ?? [];
+    final currentWallet = wallets.where((w) => w.id == id).firstOrNull;
+    final currentBalance = currentWallet?.balance ?? balance;
+    final currentName = currentWallet?.name ?? name;
+    final currentType = currentWallet?.type.name ?? type;
+    final currentIncludeInTotal = currentWallet?.includeInTotal ?? includeInTotal;
+
     final allTx = ref.watch(transactionsProvider).valueOrNull ?? [];
     final txs = allTx.where((t) => t.accountId == id).toList();
     final allCats = ref.watch(categoriesProvider);
@@ -47,7 +55,7 @@ class WalletAccountScreen extends ConsumerWidget {
             const Expanded(child: Text('Wallet Account', textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppTheme.primary))),
             IconButton(icon: const Icon(Icons.edit_outlined, color: Color(0xFF9EA3B8)),
-                onPressed: () => context.push('/add-wallet', extra: {'id': id, 'name': name, 'type': type, 'balance': balance, 'includeInTotal': includeInTotal})),
+                onPressed: () => context.push('/add-wallet', extra: {'id': id, 'name': currentName, 'type': currentType, 'balance': currentBalance, 'includeInTotal': currentIncludeInTotal})),
             IconButton(icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFF9EA3B8)),
                 onPressed: () async {
                   final confirm = await showDialog<bool>(context: context,
@@ -70,7 +78,7 @@ class WalletAccountScreen extends ConsumerWidget {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             GestureDetector(
-              onTap: () => context.push('/add-wallet', extra: {'id': id, 'name': name, 'type': type, 'balance': balance, 'includeInTotal': includeInTotal}),
+              onTap: () => context.push('/add-wallet', extra: {'id': id, 'name': currentName, 'type': currentType, 'balance': currentBalance, 'includeInTotal': currentIncludeInTotal}),
               child: Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
@@ -81,14 +89,14 @@ class WalletAccountScreen extends ConsumerWidget {
                     child: const Center(child: Text('🏦', style: TextStyle(fontSize: 22)))),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.primary)),
-                    Text(_typeLabels[type] ?? 'Account',
+                    Text(currentName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.primary)),
+                    Text(_typeLabels[currentType] ?? 'Account',
                       style: TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant.withValues(alpha: 0.7))),
                   ])),
                   Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
                     Text('BALANCE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
                         letterSpacing: 1.5, color: AppTheme.secondary.withValues(alpha: 0.6))),
-                    Text('RM${balance.toStringAsFixed(2)}',
+                    Text('RM${currentBalance.toStringAsFixed(2)}',
                       style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: AppTheme.primary)),
                   ]),
                 ]),
@@ -141,7 +149,7 @@ class _TxGroup extends StatelessWidget {
           final emoji = emojiMap[t.category];
           return Column(children: [
             if (e.key > 0) Divider(height: 1, color: AppTheme.surfaceContainerLow),
-            GestureDetector(
+            InkWell(
               onTap: () => onTap(t),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
