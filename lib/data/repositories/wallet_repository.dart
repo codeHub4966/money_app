@@ -6,6 +6,7 @@ abstract class IWalletRepository {
   Stream<List<model.Wallet>> watchAll();
   Future<void> add(model.Wallet w);
   Future<void> delete(String id);
+  Future<void> updateBalance(String id, double newBalance);
 }
 
 class LocalWalletRepository implements IWalletRepository {
@@ -35,6 +36,12 @@ class LocalWalletRepository implements IWalletRepository {
   @override
   Future<void> delete(String id) {
     return (_db.delete(_db.wallets)..where((w) => w.id.equals(id))).go();
+  }
+
+  @override
+  Future<void> updateBalance(String id, double newBalance) {
+    return (_db.update(_db.wallets)..where((w) => w.id.equals(id)))
+        .write(WalletsCompanion(balance: Value(newBalance)));
   }
 
   model.Wallet _toModel(Wallet row) => model.Wallet(

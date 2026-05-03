@@ -11,6 +11,7 @@ import '../../../core/services/backup_service.dart';
 import '../../../data/repositories/wallet_repository.dart';
 import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/app_category.dart';
+import '../../../core/services/notification_service.dart';
 import '../settings/pin_screen.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart';
@@ -31,8 +32,13 @@ class _State extends ConsumerState<SettingsScreen> {
   final _nameCtrl = TextEditingController();
   String? _savedPin;
   String? _profileImagePath;
+  bool _reminderEnabled = false;
+  TimeOfDay? _reminderTime;
   static const _profileImageKey = 'profile_image_path';
   static const _profileNameKey = 'profile_name';
+  static const _reminderEnabledKey = 'reminder_enabled';
+  static const _reminderTimeHourKey = 'reminder_time_hour';
+  static const _reminderTimeMinuteKey = 'reminder_time_minute';
 
   @override
   void initState() {
@@ -45,11 +51,19 @@ class _State extends ConsumerState<SettingsScreen> {
     SharedPreferences.getInstance().then((prefs) {
       final path = prefs.getString(_profileImageKey);
       final name = prefs.getString(_profileNameKey);
+      final remEnabled = prefs.getBool(_reminderEnabledKey) ?? false;
+      final remHour = prefs.getInt(_reminderTimeHourKey);
+      final remMinute = prefs.getInt(_reminderTimeMinuteKey);
+
       if (mounted) setState(() {
         if (path != null) _profileImagePath = path;
         if (name != null && name.isNotEmpty) {
           _name = name;
           _nameCtrl.text = name;
+        }
+        _reminderEnabled = remEnabled;
+        if (remHour != null && remMinute != null) {
+          _reminderTime = TimeOfDay(hour: remHour, minute: remMinute);
         }
       });
     });
@@ -72,29 +86,90 @@ class _State extends ConsumerState<SettingsScreen> {
     if (mounted) setState(() { _name = name; _editing = false; });
   }
 
+  void _onReminderToggle(bool value) async {
+    if (!value) {
+      setState(() => _reminderEnabled = false);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_reminderEnabledKey, false);
+      await NotificationService().cancelReminder();
+      return;
+    }
+
+    // Update toggle immediately so it feels responsive.
+    setState(() => _reminderEnabled = true);
+
+    // Always show permission sheet when enabling — lets user see + fix any missing permissions.
+    final status = await NotificationService().checkPermissions();
+    if (!mounted) { setState(() => _reminderEnabled = false); return; }
+
+    // Debug: show raw permission values as a snackbar.
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(
+        'Perms — Notif: ${status.notification} | Alarm: ${status.exactAlarm} | Battery: ${status.batteryOptimizationExempt}',
+        style: const TextStyle(fontSize: 12),
+      ),
+      duration: const Duration(seconds: 5),
+    ));
+
+    if (!status.allGranted) {
+      await _showReminderPermissionSheet(status);
+      if (!mounted) { setState(() => _reminderEnabled = false); return; }
+      final updated = await NotificationService().checkPermissions();
+      if (!updated.notification) {
+        setState(() => _reminderEnabled = false);
+        return;
+      }
+    }
+
+    final time = await showTimePicker(
+      context: context,
+      initialTime: _reminderTime ?? const TimeOfDay(hour: 20, minute: 0),
+    );
+
+    if (time != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_reminderEnabledKey, true);
+      await prefs.setInt(_reminderTimeHourKey, time.hour);
+      await prefs.setInt(_reminderTimeMinuteKey, time.minute);
+      await NotificationService().scheduleDailyReminder(time.hour, time.minute);
+      if (mounted) setState(() => _reminderTime = time);
+    } else {
+      if (mounted) setState(() => _reminderEnabled = false);
+    }
+  }
+
+  Future<void> _showReminderPermissionSheet(ReminderPermissionStatus status) async {
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      useRootNavigator: true,
+      builder: (_) => _ReminderPermissionSheet(initialStatus: status),
+    );
+  }
+
   void _onPinToggle(bool v) {
     if (v) {
       _startCreatePin();
     } else {
       // Require current PIN before deleting
+      final pinKey = GlobalKey<PinScreenState>();
       Navigator.of(context, rootNavigator: true).push(
         MaterialPageRoute(
           fullscreenDialog: true,
           builder: (ctx) => PinScreen(
+            key: pinKey,
             title: 'Current PIN',
             subtitle: 'Enter your PIN to disable it',
             onSuccess: (pin) {
               if (pin != _savedPin) {
-                Navigator.of(ctx, rootNavigator: true).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Incorrect PIN.')));
+                pinKey.currentState?.showWrongPinError();
                 return;
               }
               PinService.deletePin();
               setState(() {
                 _savedPin = null;
                 _pinEnabled = false;
-                _biometricEnabled = false;
               });
               Navigator.of(ctx, rootNavigator: true).pop();
               ScaffoldMessenger.of(context).showSnackBar(
@@ -125,6 +200,12 @@ class _State extends ConsumerState<SettingsScreen> {
           const SnackBar(content: Text('Biometric authentication enabled.')));
       }
     } else {
+      // Require biometric to disable
+      final success = await PinService.authenticateWithBiometric(
+        reason: 'Authenticate to disable Biometric Authentication',
+      );
+      if (!success) return;
+
       // Disable biometric
       await PinService.setBiometricEnabled(false);
       setState(() => _biometricEnabled = false);
@@ -171,16 +252,16 @@ class _State extends ConsumerState<SettingsScreen> {
   }
 
   void _startEditPin() {
+    final pinKey = GlobalKey<PinScreenState>();
     Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
       fullscreenDialog: true,
       builder: (ctx1) => PinScreen(
+        key: pinKey,
         title: 'Current PIN',
         subtitle: 'Enter your current PIN',
         onSuccess: (pin) {
           if (pin != _savedPin) {
-            Navigator.of(ctx1, rootNavigator: true).pop();
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Incorrect PIN.')));
+            pinKey.currentState?.showWrongPinError();
             return;
           }
           String? firstPin;
@@ -273,8 +354,6 @@ class _State extends ConsumerState<SettingsScreen> {
                         decoration: const InputDecoration(isDense: true, border: UnderlineInputBorder()))
                     else
                       Text(_name, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
-                    const Text('Private Client · Since 2021',
-                      style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant)),
                     const SizedBox(height: 8),
                     GestureDetector(
                       onTap: () {
@@ -296,25 +375,48 @@ class _State extends ConsumerState<SettingsScreen> {
             // Category Management card
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: GestureDetector(
-                onTap: () => context.push('/categories'),
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
-                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
-                  child: Row(children: [
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Row(children: [
+                    Icon(Icons.tune_rounded, color: AppTheme.primary, size: 22),
+                    SizedBox(width: 10),
+                    Text('Preferences', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppTheme.onSurface)),
+                  ]),
+                  const SizedBox(height: 16),
+                  GestureDetector(
+                    onTap: () => context.push('/categories'),
+                    child: Row(children: [
+                      Container(width: 44, height: 44,
+                        decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(14)),
+                        child: const Icon(Icons.category_rounded, color: AppTheme.primary, size: 22)),
+                      const SizedBox(width: 16),
+                      const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Category Management', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppTheme.onSurface)),
+                        Text('Add, view and organise transaction categories',
+                          style: TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
+                      ])),
+                      const Icon(Icons.chevron_right_rounded, color: AppTheme.onSurfaceVariant),
+                    ]),
+                  ),
+                  Divider(color: AppTheme.surfaceContainerLow, height: 32),
+                  Row(children: [
                     Container(width: 44, height: 44,
                       decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(14)),
-                      child: const Icon(Icons.category_rounded, color: AppTheme.primary, size: 22)),
+                      child: const Icon(Icons.notifications_active_rounded, color: AppTheme.primary, size: 22)),
                     const SizedBox(width: 16),
-                    const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('Category Management', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppTheme.onSurface)),
-                      Text('Add, view and organise transaction categories',
-                        style: TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('Daily Reminder', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppTheme.onSurface)),
+                      Text(_reminderEnabled && _reminderTime != null 
+                        ? 'Reminds you to record expenses at ${_reminderTime!.format(context)}' 
+                        : 'Remind you to record expenses daily',
+                        style: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
                     ])),
-                    const Icon(Icons.chevron_right_rounded, color: AppTheme.onSurfaceVariant),
+                    Switch(value: _reminderEnabled, onChanged: _onReminderToggle, activeColor: AppTheme.secondary),
                   ]),
-                ),
+                ]),
               ),
             ),
             const SizedBox(height: 20),
@@ -354,8 +456,8 @@ class _State extends ConsumerState<SettingsScreen> {
                   _ToggleRow(
                     title: 'Biometric Authentication',
                     subtitle: 'Use FaceID or Fingerprint to unlock',
-                    value: _biometricEnabled && _pinEnabled,
-                    onChanged: _pinEnabled ? _onBiometricToggle : null,
+                    value: _biometricEnabled,
+                    onChanged: _onBiometricToggle,
                   ),
                 ]),
               ),
@@ -426,6 +528,7 @@ class _State extends ConsumerState<SettingsScreen> {
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
+      useRootNavigator: true,
       builder: (_) => _ExportSheet(
         categories: ref.read(categoriesProvider),
         walletOrder: ref.read(walletOrderProvider),
@@ -442,6 +545,7 @@ class _State extends ConsumerState<SettingsScreen> {
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
+      useRootNavigator: true,
       builder: (_) => _ImportSheet(
         txRepo: ref.read(transactionRepositoryProvider),
         walletRepo: ref.read(walletRepositoryProvider),
@@ -781,4 +885,185 @@ class _ResultBanner extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _ReminderPermissionSheet extends StatefulWidget {
+  final ReminderPermissionStatus initialStatus;
+  const _ReminderPermissionSheet({required this.initialStatus});
+
+  @override
+  State<_ReminderPermissionSheet> createState() => _ReminderPermissionSheetState();
+}
+
+class _ReminderPermissionSheetState extends State<_ReminderPermissionSheet> {
+  late bool _notifGranted;
+  late bool _exactAlarmGranted;
+  late bool _batteryGranted;
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _notifGranted = widget.initialStatus.notification;
+    _exactAlarmGranted = widget.initialStatus.exactAlarm;
+    _batteryGranted = widget.initialStatus.batteryOptimizationExempt;
+  }
+
+  Future<void> _refresh() async {
+    final s = await NotificationService().checkPermissions();
+    if (mounted) {
+      setState(() {
+        _notifGranted = s.notification;
+        _exactAlarmGranted = s.exactAlarm;
+        _batteryGranted = s.batteryOptimizationExempt;
+      });
+    }
+  }
+
+  Widget _permRow({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String sub,
+    required bool granted,
+    required String buttonLabel,
+    required Future<void> Function() onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        children: [
+          Container(
+            width: 44, height: 44,
+            decoration: BoxDecoration(
+              color: iconColor.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: iconColor, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              Text(sub, style: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
+            ],
+          )),
+          const SizedBox(width: 8),
+          if (granted)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF14B8A6).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.check_circle_rounded, size: 14, color: Color(0xFF0D9488)),
+                SizedBox(width: 4),
+                Text('Granted', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF0D9488))),
+              ]),
+            )
+          else
+            GestureDetector(
+              onTap: _loading ? null : () async {
+                setState(() => _loading = true);
+                await onTap();
+                await _refresh();
+                setState(() => _loading = false);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppTheme.primary,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(buttonLabel,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.white)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final allDone = _notifGranted && _exactAlarmGranted && _batteryGranted;
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
+      padding: EdgeInsets.fromLTRB(24, 16, 24, MediaQuery.of(context).viewInsets.bottom + 32),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Center(child: Container(width: 48, height: 5,
+          decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(3)))),
+        const SizedBox(height: 20),
+        Row(children: [
+          Container(
+            width: 44, height: 44,
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(Icons.notifications_active_rounded, color: AppTheme.primary, size: 24),
+          ),
+          const SizedBox(width: 14),
+          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Reminder Permissions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            Text('Grant these for reminders to work reliably', style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant)),
+          ])),
+        ]),
+        const SizedBox(height: 20),
+        _permRow(
+          icon: Icons.notifications_rounded,
+          iconColor: AppTheme.primary,
+          title: 'Notification Permission',
+          sub: 'Allow the app to show notifications',
+          granted: _notifGranted,
+          buttonLabel: 'Allow',
+          onTap: () => NotificationService().requestNotificationPermission(),
+        ),
+        _permRow(
+          icon: Icons.alarm_rounded,
+          iconColor: const Color(0xFFF59E0B),
+          title: 'Exact Alarm',
+          sub: 'Schedule notifications at precise times',
+          granted: _exactAlarmGranted,
+          buttonLabel: 'Allow',
+          onTap: () => NotificationService().openExactAlarmSettings(),
+        ),
+        _permRow(
+          icon: Icons.battery_saver_rounded,
+          iconColor: const Color(0xFF10B981),
+          title: 'Battery Optimization',
+          sub: 'Prevent the system from blocking reminders',
+          granted: _batteryGranted,
+          buttonLabel: 'Exempt',
+          onTap: () => NotificationService().requestBatteryOptimizationExemption(),
+        ),
+        const SizedBox(height: 8),
+        GestureDetector(
+          onTap: () => Navigator.pop(context),
+          child: Container(
+            height: 52, width: double.infinity,
+            decoration: BoxDecoration(
+              color: allDone ? AppTheme.primary : AppTheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(24),
+            ),
+            child: Center(
+              child: Text(
+                allDone ? 'Done — Set Reminder Time' : 'Continue Anyway',
+                style: TextStyle(
+                  color: allDone ? Colors.white : AppTheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
 }

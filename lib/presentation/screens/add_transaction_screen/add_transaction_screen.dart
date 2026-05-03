@@ -26,10 +26,11 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   late TransactionType _type;
   late String _account;
   late String _category;
-  late final TextEditingController _amountCtrl;
+  late String _amount;
   late final TextEditingController _noteCtrl;
   late DateTime _date;
   bool _saving = false;
+  bool _showNumberPad = false;
 
   @override
   void initState() {
@@ -47,7 +48,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       _account = sorted.isNotEmpty ? sorted.first.id : '';
     }
 
-    _amountCtrl = TextEditingController(text: t != null ? t.amount.toStringAsFixed(2) : '');
+    _amount = t != null ? t.amount.toStringAsFixed(2) : '';
     _noteCtrl = TextEditingController(text: t?.note ?? '');
     _date = t?.date ?? DateTime.now();
 
@@ -61,12 +62,122 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     }
   }
 
+  void _onKey(String key) {
+    setState(() {
+      if (key == 'backspace') {
+        if (_amount.isNotEmpty) _amount = _amount.substring(0, _amount.length - 1);
+      } else if (key == 'empty') {
+        _amount = '';
+      } else if (key == '.') {
+        if (_amount.isEmpty) {
+          _amount = '0.';
+        } else {
+          final lastNum = _getLastNumber(_amount);
+          if (!lastNum.contains('.')) {
+            _amount = '$_amount.';
+          }
+        }
+      } else if (key == '+' || key == '-') {
+        if (_amount.isEmpty) return;
+        final lastChar = _amount[_amount.length - 1];
+        if ('+-'.contains(lastChar)) {
+          _amount = _amount.substring(0, _amount.length - 1) + key;
+        } else {
+          _amount = '$_amount$key';
+        }
+      } else if (key == '=') {
+        final result = _evaluateExpression(_amount);
+        if (result != null) {
+          _amount = result.toString();
+        }
+      } else {
+        _amount = _amount == '0' ? key : '$_amount$key';
+      }
+    });
+  }
+
+  String _getLastNumber(String expr) {
+    if (expr.isEmpty) return '';
+    int i = expr.length - 1;
+    while (i >= 0 && !'+-'.contains(expr[i])) {
+      i--;
+    }
+    return expr.substring(i + 1);
+  }
+
+  double? _evaluateExpression(String expr) {
+    if (expr.isEmpty) return null;
+    try {
+      while (expr.isNotEmpty && '+-'.contains(expr[expr.length - 1])) {
+        expr = expr.substring(0, expr.length - 1);
+      }
+      if (expr.isEmpty) return null;
+
+      final tokens = <String>[];
+      String currentNum = '';
+
+      for (int i = 0; i < expr.length; i++) {
+        final char = expr[i];
+        if ('+-'.contains(char)) {
+          if (currentNum.isNotEmpty) {
+            tokens.add(currentNum);
+            currentNum = '';
+          }
+          tokens.add(char);
+        } else {
+          currentNum += char;
+        }
+      }
+      if (currentNum.isNotEmpty) tokens.add(currentNum);
+
+      if (tokens.isEmpty) return null;
+
+      final values = <double>[];
+      final operators = <String>[];
+
+      for (final token in tokens) {
+        if ('+-'.contains(token)) {
+          operators.add(token);
+        } else {
+          final num = double.tryParse(token);
+          if (num == null) return null;
+          values.add(num);
+        }
+      }
+
+      if (values.isEmpty) return null;
+
+      int i = 0;
+      while (i < operators.length) {
+        if (operators[i] == '+') {
+          values[i] = values[i] + values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else if (operators[i] == '-') {
+          values[i] = values[i] - values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else {
+          i++;
+        }
+      }
+
+      final result = values[0];
+      return result % 1 == 0 ? result.roundToDouble() : result;
+    } catch (e) {
+      return null;
+    }
+  }
+
   List<AppCategory> _cats(Map<String, List<AppCategory>> all) =>
       all[_type == TransactionType.income ? 'income' : 'expense'] ?? [];
 
   Future<void> _save() async {
-    final amount = double.tryParse(_amountCtrl.text);
-    if (amount == null || amount <= 0) return;
+    final amount = double.tryParse(_amount);
+    if (amount == null || amount <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter a valid amount.')));
+      return;
+    }
 
     // Block save if no wallet selected
     final wallets = ref.read(walletsProvider).valueOrNull ?? [];
@@ -149,7 +260,19 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
               _buildAttachmentRow(),
             ]),
           )),
-          _buildConfirmButton(),
+          if (_showNumberPad)
+            GestureDetector(
+              onVerticalDragEnd: (d) {
+                if (d.primaryVelocity != null && d.primaryVelocity! > 300) {
+                  setState(() => _showNumberPad = false);
+                }
+              },
+              child: _NumberPad(amount: _amount, onKey: _onKey, onDone: () {
+                setState(() => _showNumberPad = false);
+              }),
+            )
+          else
+            _buildConfirmButton(),
         ]),
       ),
     );
@@ -215,25 +338,26 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   }
 
   Widget _buildAmountInput() {
-    return Column(children: [
-      Text('ENTER AMOUNT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
-          letterSpacing: 2, color: AppTheme.onSurfaceVariant.withValues(alpha: 0.7))),
-      const SizedBox(height: 8),
-      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        const Text('RM', style: TextStyle(fontSize: 36, fontWeight: FontWeight.w700, color: AppTheme.secondary)),
-        const SizedBox(width: 8),
-        IntrinsicWidth(child: TextField(
-          controller: _amountCtrl,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          style: const TextStyle(fontSize: 56, fontWeight: FontWeight.w800, color: AppTheme.primary),
-          decoration: const InputDecoration(
-            hintText: '0.00',
-            hintStyle: TextStyle(fontSize: 56, fontWeight: FontWeight.w800, color: Color(0xFFCDD0E0)),
-            border: InputBorder.none,
+    return GestureDetector(
+      onTap: () => setState(() => _showNumberPad = true),
+      child: Column(children: [
+        Text('ENTER AMOUNT', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
+            letterSpacing: 2, color: AppTheme.onSurfaceVariant.withValues(alpha: 0.7))),
+        const SizedBox(height: 8),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          const Text('RM', style: TextStyle(fontSize: 36, fontWeight: FontWeight.w700, color: AppTheme.secondary)),
+          const SizedBox(width: 8),
+          Text(
+            _amount.isEmpty ? '0.00' : _amount,
+            style: TextStyle(
+              fontSize: 56,
+              fontWeight: FontWeight.w800,
+              color: _amount.isEmpty ? const Color(0xFFCDD0E0) : AppTheme.primary,
+            ),
           ),
-        )),
+        ]),
       ]),
-    ]);
+    );
   }
 
   Widget _buildSectionLabel(String label) {
@@ -540,8 +664,6 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   Widget _buildAttachmentRow() {
     return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       _AttachBtn(icon: Icons.camera_alt_outlined, label: 'Receipt'),
-      const SizedBox(width: 32),
-      _AttachBtn(icon: Icons.label_outline_rounded, label: 'Add Tag'),
     ]);
   }
 
@@ -577,6 +699,74 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
   String _monthName(int m) =>
       const ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m - 1];
+}
+
+class _NumberPad extends StatelessWidget {
+  final String amount;
+  final void Function(String) onKey;
+  final VoidCallback onDone;
+  const _NumberPad({required this.amount, required this.onKey, required this.onDone});
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = [
+      ['7','8','9','Empty'],
+      ['4','5','6','-'],
+      ['1','2','3','+'],
+      ['.','0','⌫','='],
+    ];
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(40)),
+        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 40, offset: Offset(0, -10))],
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Center(child: Container(
+          width: 48, height: 5,
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        )),
+        const SizedBox(height: 16),
+        ...keys.map((row) => Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(children: row.map((k) {
+            final isOp = ['Empty','-','+','='].contains(k);
+            final isEquals = k == '=';
+            return Expanded(child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: GestureDetector(
+                onTap: () => onKey(k == '⌫' ? 'backspace' : k == 'Empty' ? 'empty' : k),
+                child: Container(
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: isEquals ? AppTheme.primary : (isOp ? const Color(0xFFE4EBEC) : const Color(0xFFF8F9FB)),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Center(child: k == '⌫'
+                    ? Icon(Icons.backspace_outlined, size: 22, color: isEquals ? Colors.white : AppTheme.onSurface)
+                    : Text(k, style: TextStyle(fontSize: isOp ? 18 : 22, fontWeight: FontWeight.w600, color: isEquals ? Colors.white : AppTheme.onSurface))),
+                ),
+              ),
+            ));
+          }).toList()),
+        )),
+        const SizedBox(height: 8),
+        GestureDetector(
+          onTap: onDone,
+          child: Container(
+            height: 56, width: double.infinity,
+            decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
+              boxShadow: [BoxShadow(color: AppTheme.primary.withValues(alpha: 0.3), blurRadius: 16, offset: const Offset(0, 8))]),
+            child: const Center(child: Text('Done', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white))),
+          ),
+        ),
+      ]),
+    );
+  }
 }
 
 class _AccountSheetTile extends StatelessWidget {

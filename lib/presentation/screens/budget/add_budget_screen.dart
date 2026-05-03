@@ -34,18 +34,152 @@ class _State extends ConsumerState<AddBudgetScreen> {
       } else if (key == 'empty') {
         _amount = '';
       } else if (key == '.') {
-        if (!_amount.contains('.')) _amount = _amount.isEmpty ? '0.' : '$_amount.';
-      } else if (key == '+/-' || key == 'x' || key == '=') {
-        // no-op
+        if (_amount.isEmpty) {
+          _amount = '0.';
+        } else {
+          // Check if the last number in the expression already has a decimal
+          final lastNum = _getLastNumber(_amount);
+          if (!lastNum.contains('.')) {
+            _amount = '$_amount.';
+          }
+        }
+      } else if (key == '+' || key == '-' || key == 'x' || key == '/') {
+        if (_amount.isEmpty) return;
+        // Don't add operator if last char is already an operator
+        final lastChar = _amount[_amount.length - 1];
+        if ('+-x/'.contains(lastChar)) {
+          _amount = _amount.substring(0, _amount.length - 1) + key;
+        } else {
+          _amount = '$_amount$key';
+        }
+      } else if (key == '=') {
+        final result = _evaluateExpression(_amount);
+        if (result != null) {
+          _amount = result.toString();
+        }
+      } else if (key == '+/-') {
+        // Toggle sign of the last number
+        if (_amount.isEmpty) return;
+        final lastNum = _getLastNumber(_amount);
+        if (lastNum.isEmpty) return;
+        final prefix = _amount.substring(0, _amount.length - lastNum.length);
+        final num = double.tryParse(lastNum);
+        if (num != null) {
+          final toggled = -num;
+          _amount = '$prefix${toggled % 1 == 0 ? toggled.toInt().toString() : toggled.toString()}';
+        }
       } else {
         _amount = _amount == '0' ? key : '$_amount$key';
       }
     });
   }
 
+  String _getLastNumber(String expr) {
+    if (expr.isEmpty) return '';
+    int i = expr.length - 1;
+    while (i >= 0 && !'+-x/'.contains(expr[i])) {
+      i--;
+    }
+    return expr.substring(i + 1);
+  }
+
+  double? _evaluateExpression(String expr) {
+    if (expr.isEmpty) return null;
+    try {
+      // Replace x with * for evaluation
+      expr = expr.replaceAll('x', '*');
+
+      // Remove trailing operators
+      while (expr.isNotEmpty && '+-*/'.contains(expr[expr.length - 1])) {
+        expr = expr.substring(0, expr.length - 1);
+      }
+
+      if (expr.isEmpty) return null;
+
+      // Simple expression evaluator
+      final tokens = <String>[];
+      String currentNum = '';
+
+      for (int i = 0; i < expr.length; i++) {
+        final char = expr[i];
+        if ('+-*/'.contains(char)) {
+          if (currentNum.isNotEmpty) {
+            tokens.add(currentNum);
+            currentNum = '';
+          }
+          tokens.add(char);
+        } else {
+          currentNum += char;
+        }
+      }
+      if (currentNum.isNotEmpty) tokens.add(currentNum);
+
+      if (tokens.isEmpty) return null;
+
+      // Convert to numbers and operators
+      final values = <double>[];
+      final operators = <String>[];
+
+      for (final token in tokens) {
+        if ('+-*/'.contains(token)) {
+          operators.add(token);
+        } else {
+          final num = double.tryParse(token);
+          if (num == null) return null;
+          values.add(num);
+        }
+      }
+
+      if (values.isEmpty) return null;
+
+      // First pass: handle * and /
+      int i = 0;
+      while (i < operators.length) {
+        if (operators[i] == '*') {
+          values[i] = values[i] * values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else if (operators[i] == '/') {
+          if (values[i + 1] == 0) return null; // Division by zero
+          values[i] = values[i] / values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else {
+          i++;
+        }
+      }
+
+      // Second pass: handle + and -
+      i = 0;
+      while (i < operators.length) {
+        if (operators[i] == '+') {
+          values[i] = values[i] + values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else if (operators[i] == '-') {
+          values[i] = values[i] - values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else {
+          i++;
+        }
+      }
+
+      final result = values[0];
+      // Return integer if no decimal part
+      return result % 1 == 0 ? result.roundToDouble() : result;
+    } catch (e) {
+      return null;
+    }
+  }
+
   Future<void> _save() async {
     final limit = double.tryParse(_amount);
-    if (limit == null || limit <= 0 || _selectedId == null) return;
+    if (limit == null || limit <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter a valid budget amount.')));
+      return;
+    }
+    if (_selectedId == null) return;
     await ref.read(budgetRepositoryProvider).add(Budget(
       id: widget.initialId ?? DateTime.now().millisecondsSinceEpoch.toString(),
       categoryName: _selectedId!, // stored as label
@@ -134,8 +268,8 @@ class _NumberPad extends StatelessWidget {
   Widget build(BuildContext context) {
     final keys = [
       ['7','8','9','Empty'],
-      ['4','5','6','×'],
-      ['1','2','3','+/-'],
+      ['4','5','6','-'],
+      ['1','2','3','+'],
       ['.','0','⌫','='],
     ];
     return Container(
@@ -146,6 +280,14 @@ class _NumberPad extends StatelessWidget {
       ),
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Center(child: Container(
+          width: 48, height: 5,
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        )),
+        const SizedBox(height: 16),
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(vertical: 12),
@@ -162,20 +304,21 @@ class _NumberPad extends StatelessWidget {
         ...keys.map((row) => Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: Row(children: row.map((k) {
-            final isOp = ['Empty','×','+/-','='].contains(k);
+            final isOp = ['Empty','-','+','='].contains(k);
+            final isEquals = k == '=';
             return Expanded(child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: GestureDetector(
-                onTap: () => onKey(k == '⌫' ? 'backspace' : k == 'Empty' ? 'empty' : k == '×' ? 'x' : k),
+                onTap: () => onKey(k == '⌫' ? 'backspace' : k == 'Empty' ? 'empty' : k),
                 child: Container(
                   height: 50,
                   decoration: BoxDecoration(
-                    color: isOp ? const Color(0xFFE4EBEC) : const Color(0xFFF8F9FB),
+                    color: isEquals ? AppTheme.primary : (isOp ? const Color(0xFFE4EBEC) : const Color(0xFFF8F9FB)),
                     borderRadius: BorderRadius.circular(18),
                   ),
                   child: Center(child: k == '⌫'
-                    ? const Icon(Icons.backspace_outlined, size: 22, color: AppTheme.onSurface)
-                    : Text(k, style: TextStyle(fontSize: isOp ? 16 : 22, fontWeight: FontWeight.w600, color: AppTheme.onSurface))),
+                    ? Icon(Icons.backspace_outlined, size: 22, color: isEquals ? Colors.white : AppTheme.onSurface)
+                    : Text(k, style: TextStyle(fontSize: isOp ? 18 : 22, fontWeight: FontWeight.w600, color: isEquals ? Colors.white : AppTheme.onSurface))),
                 ),
               ),
             ));

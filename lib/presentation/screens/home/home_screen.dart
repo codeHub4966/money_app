@@ -21,16 +21,16 @@ class HomeScreen extends ConsumerWidget {
     final now = DateTime.now();
     final monthTx = transactions.where((t) => t.date.year == now.year && t.date.month == now.month);
 
-    // Wallets excluded from total — their transactions don't count toward income/expense
-    final excludedWalletIds = wallets.where((w) => !w.includeInTotal).map((w) => w.id).toSet();
 
+    // Income & expense count ALL wallets regardless of includeInTotal.
+    // Balance Adjustment and Transfer are internal moves, not real income/expense.
     final income = monthTx
-        .where((t) => t.type == tx.TransactionType.income && t.category != 'Transfer' && !excludedWalletIds.contains(t.accountId))
+        .where((t) => t.type == tx.TransactionType.income && t.category != 'Transfer' && t.category != 'Balance Adjustment')
         .fold(0.0, (s, t) => s + t.amount);
     final expense = monthTx
-        .where((t) => t.type == tx.TransactionType.expense && t.category != 'Transfer' && !excludedWalletIds.contains(t.accountId))
+        .where((t) => t.type == tx.TransactionType.expense && t.category != 'Transfer' && t.category != 'Balance Adjustment')
         .fold(0.0, (s, t) => s + t.amount);
-    // Total balance = sum of all wallet balances included in total
+    // Total balance = only wallets marked includeInTotal
     final totalBalance = wallets.where((w) => w.includeInTotal).fold(0.0, (s, w) => s + w.balance);
     final totalBudget = budgets.fold(0.0, (s, b) => s + b.monthlyLimit);
     final totalSpent = budgets.fold(0.0, (s, b) => s + b.spent);
@@ -63,7 +63,6 @@ class HomeScreen extends ConsumerWidget {
               _RecentActivity(
                 transactions: transactions,
                 emojiMap: emojiMap,
-                excludedWalletIds: excludedWalletIds,
                 onTap: (t) => context.push('/transaction-details', extra: t),
               ),
             ],
@@ -115,17 +114,6 @@ class _HeaderState extends State<_Header> {
             Text('WELCOME BACK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
                 letterSpacing: 1.5, color: AppTheme.onSurfaceVariant)),
             Text(_profileName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
-          ]),
-          const Spacer(),
-          Stack(children: [
-            Container(padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(50),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 8)]),
-              child: const Icon(Icons.notifications_none_rounded, size: 20, color: AppTheme.onSurfaceVariant)),
-            Positioned(top: 10, right: 12,
-              child: Container(width: 8, height: 8,
-                decoration: BoxDecoration(color: Colors.red, shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 1.5)))),
           ]),
         ],
       ),
@@ -240,9 +228,8 @@ class _BudgetCard extends StatelessWidget {
 class _RecentActivity extends StatelessWidget {
   final List<tx.Transaction> transactions;
   final Map<String, String> emojiMap;
-  final Set<String> excludedWalletIds;
   final void Function(tx.Transaction) onTap;
-  const _RecentActivity({required this.transactions, required this.emojiMap, required this.excludedWalletIds, required this.onTap});
+  const _RecentActivity({required this.transactions, required this.emojiMap, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -304,7 +291,7 @@ class _RecentActivity extends StatelessWidget {
                 const SizedBox(width: 16),
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(t.category, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
-                  Text(t.category == 'Transfer' ? 'Transfer' : (excludedWalletIds.contains(t.accountId) ? 'Record' : t.type.name), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
+                  Text(t.category == 'Transfer' ? 'Transfer' : (t.category == 'Balance Adjustment' ? 'Balance Adjustment' : t.type.name), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
                 ]),
                 const Spacer(),
                 Column(crossAxisAlignment: CrossAxisAlignment.end, children: [

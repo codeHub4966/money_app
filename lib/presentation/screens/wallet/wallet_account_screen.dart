@@ -34,7 +34,10 @@ class WalletAccountScreen extends ConsumerWidget {
     final allCats = ref.watch(categoriesProvider);
     final emojiMap = <String, String>{};
     for (final cats in allCats.values) {
-      for (final c in cats) emojiMap[c.id] = c.emoji;
+      for (final c in cats) {
+        emojiMap[c.id] = c.emoji;
+        emojiMap[c.label] = c.emoji;
+      }
     }
 
     // Group by date

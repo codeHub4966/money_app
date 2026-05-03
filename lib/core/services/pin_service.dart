@@ -19,7 +19,6 @@ class PinService {
   static Future<void> deletePin() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_key);
-    await prefs.remove(_biometricKey);
   }
 
   static Future<bool> isBiometricEnabled() async {
@@ -42,16 +41,24 @@ class PinService {
     }
   }
 
-  static Future<bool> authenticateWithBiometric() async {
+  static bool isAuthenticating = false;
+
+  static Future<bool> authenticateWithBiometric({String reason = 'Authenticate to unlock Money App'}) async {
+    isAuthenticating = true;
     try {
-      return await _localAuth.authenticate(
-        localizedReason: 'Authenticate to unlock Money App',
+      final result = await _localAuth.authenticate(
+        localizedReason: reason,
         options: const AuthenticationOptions(
           stickyAuth: true,
           biometricOnly: true,
         ),
       );
+      // Slight delay to ensure app lifecycle resumes before clearing the flag
+      await Future.delayed(const Duration(milliseconds: 500));
+      isAuthenticating = false;
+      return result;
     } catch (e) {
+      isAuthenticating = false;
       return false;
     }
   }

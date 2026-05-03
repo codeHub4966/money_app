@@ -16,13 +16,132 @@ class TransferFundsScreen extends ConsumerStatefulWidget {
 class _State extends ConsumerState<TransferFundsScreen> {
   String? _fromId;
   String? _toId;
-  final _amountCtrl = TextEditingController();
+  String _amount = '';
   final _noteCtrl = TextEditingController();
   DateTime _date = DateTime.now();
+  bool _showNumberPad = false;
+
+  void _onKey(String key) {
+    setState(() {
+      if (key == 'backspace') {
+        if (_amount.isNotEmpty) _amount = _amount.substring(0, _amount.length - 1);
+      } else if (key == 'empty') {
+        _amount = '';
+      } else if (key == '.') {
+        if (_amount.isEmpty) {
+          _amount = '0.';
+        } else {
+          final lastNum = _getLastNumber(_amount);
+          if (!lastNum.contains('.')) {
+            _amount = '$_amount.';
+          }
+        }
+      } else if (key == '+' || key == '-') {
+        if (_amount.isEmpty) return;
+        final lastChar = _amount[_amount.length - 1];
+        if ('+-'.contains(lastChar)) {
+          _amount = _amount.substring(0, _amount.length - 1) + key;
+        } else {
+          _amount = '$_amount$key';
+        }
+      } else if (key == '=') {
+        final result = _evaluateExpression(_amount);
+        if (result != null) {
+          _amount = result.toString();
+        }
+      } else {
+        _amount = _amount == '0' ? key : '$_amount$key';
+      }
+    });
+  }
+
+  String _getLastNumber(String expr) {
+    if (expr.isEmpty) return '';
+    int i = expr.length - 1;
+    while (i >= 0 && !'+-'.contains(expr[i])) {
+      i--;
+    }
+    return expr.substring(i + 1);
+  }
+
+  double? _evaluateExpression(String expr) {
+    if (expr.isEmpty) return null;
+    try {
+      while (expr.isNotEmpty && '+-'.contains(expr[expr.length - 1])) {
+        expr = expr.substring(0, expr.length - 1);
+      }
+      if (expr.isEmpty) return null;
+
+      final tokens = <String>[];
+      String currentNum = '';
+
+      for (int i = 0; i < expr.length; i++) {
+        final char = expr[i];
+        if ('+-'.contains(char)) {
+          if (currentNum.isNotEmpty) {
+            tokens.add(currentNum);
+            currentNum = '';
+          }
+          tokens.add(char);
+        } else {
+          currentNum += char;
+        }
+      }
+      if (currentNum.isNotEmpty) tokens.add(currentNum);
+
+      if (tokens.isEmpty) return null;
+
+      final values = <double>[];
+      final operators = <String>[];
+
+      for (final token in tokens) {
+        if ('+-'.contains(token)) {
+          operators.add(token);
+        } else {
+          final num = double.tryParse(token);
+          if (num == null) return null;
+          values.add(num);
+        }
+      }
+
+      if (values.isEmpty) return null;
+
+      int i = 0;
+      while (i < operators.length) {
+        if (operators[i] == '+') {
+          values[i] = values[i] + values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else if (operators[i] == '-') {
+          values[i] = values[i] - values[i + 1];
+          values.removeAt(i + 1);
+          operators.removeAt(i);
+        } else {
+          i++;
+        }
+      }
+
+      final result = values[0];
+      return result % 1 == 0 ? result.roundToDouble() : result;
+    } catch (e) {
+      return null;
+    }
+  }
 
   Future<void> _transfer(List<Wallet> wallets) async {
-    final amount = double.tryParse(_amountCtrl.text);
-    if (amount == null || amount <= 0 || _fromId == null || _toId == null || _fromId == _toId) return;
+    final amount = double.tryParse(_amount);
+    if (amount == null || amount <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please enter a valid amount.')));
+      return;
+    }
+    if (_fromId == null || _toId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select both wallets.')));
+      return;
+    }
+    if (_fromId == _toId) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot transfer to the same wallet.')));
+      return;
+    }
     final from = wallets.firstWhere((w) => w.id == _fromId);
     final to = wallets.firstWhere((w) => w.id == _toId);
     if (from.balance < amount) {
@@ -32,7 +151,7 @@ class _State extends ConsumerState<TransferFundsScreen> {
     final walletRepo = ref.read(walletRepositoryProvider);
     final txRepo = ref.read(transactionRepositoryProvider);
     final now = DateTime.now();
-    final note = _noteCtrl.text.isEmpty ? 'Transfer to ${to.name}' : _noteCtrl.text;
+    final note = _noteCtrl.text;
     await walletRepo.add(Wallet(id: from.id, name: from.name, type: from.type, balance: from.balance - amount, includeInTotal: from.includeInTotal));
     await walletRepo.add(Wallet(id: to.id, name: to.name, type: to.type, balance: to.balance + amount, includeInTotal: to.includeInTotal));
     await txRepo.add(Transaction(
@@ -50,7 +169,7 @@ class _State extends ConsumerState<TransferFundsScreen> {
       amount: amount,
       category: 'Transfer',
       accountId: to.id,
-      note: 'Transfer from ${from.name}',
+      note: note,
       date: now,
     ));
     if (mounted) context.pop();
@@ -98,10 +217,10 @@ class _State extends ConsumerState<TransferFundsScreen> {
             // From/To cards
             Stack(children: [
               Column(children: [
-                _WalletCard(label: 'FROM', wallet: from, amount: _amountCtrl.text,
+                _WalletCard(label: 'FROM', wallet: from, amount: _amount,
                     onTap: () => _showPicker(true, wallets), onAmountTap: () {}),
                 const SizedBox(height: 8),
-                _WalletCard(label: 'TO', wallet: to, amount: _amountCtrl.text,
+                _WalletCard(label: 'TO', wallet: to, amount: _amount,
                     onTap: () => _showPicker(false, wallets), onAmountTap: () {}),
               ]),
               Positioned(left: 0, right: 0, top: 0, bottom: 0,
@@ -111,39 +230,39 @@ class _State extends ConsumerState<TransferFundsScreen> {
                     width: 40, height: 40,
                     decoration: BoxDecoration(color: AppTheme.primary, shape: BoxShape.circle,
                       border: Border.all(color: AppTheme.surface, width: 4),
-                      boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.4), blurRadius: 12)]),
+                      boxShadow: [BoxShadow(color: AppTheme.primary.withValues(alpha: 0.4), blurRadius: 12)]),
                     child: const Icon(Icons.swap_vert_rounded, color: Colors.white, size: 20),
                   ),
                 ))),
             ]),
             const SizedBox(height: 24),
             // Amount input
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
-              child: Row(children: [
-                const Text('RM', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: AppTheme.secondary)),
-                const SizedBox(width: 12),
-                Expanded(child: TextField(
-                  controller: _amountCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: AppTheme.primary),
-                  decoration: const InputDecoration(
-                    hintText: '0.00',
-                    hintStyle: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: Color(0xFFCDD0E0)),
-                    border: InputBorder.none, isDense: true,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                )),
-              ]),
+            GestureDetector(
+              onTap: () => setState(() => _showNumberPad = true),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
+                child: Row(children: [
+                  const Text('RM', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: AppTheme.secondary)),
+                  const SizedBox(width: 12),
+                  Expanded(child: Text(
+                    _amount.isEmpty ? '0.00' : _amount,
+                    style: TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.w800,
+                      color: _amount.isEmpty ? const Color(0xFFCDD0E0) : AppTheme.primary,
+                    ),
+                  )),
+                ]),
+              ),
             ),
             const SizedBox(height: 32),
             const Text('Others', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
             const SizedBox(height: 12),
             Container(
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
               child: Column(children: [
                 _OtherRow(icon: Icons.description_outlined, label: 'Notes',
                   child: TextField(controller: _noteCtrl,
@@ -165,18 +284,98 @@ class _State extends ConsumerState<TransferFundsScreen> {
             ),
           ]),
         )),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-          child: GestureDetector(
-            onTap: () => _transfer(wallets),
-            child: Container(height: 56, width: double.infinity,
-              decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
-                boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.3), blurRadius: 20, offset: const Offset(0, 8))]),
-              child: const Center(child: Text('Transfer',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)))),
+        if (_showNumberPad)
+          GestureDetector(
+            onVerticalDragEnd: (d) {
+              if (d.primaryVelocity != null && d.primaryVelocity! > 300) {
+                setState(() => _showNumberPad = false);
+              }
+            },
+            child: _NumberPad(amount: _amount, onKey: _onKey, onDone: () {
+              setState(() => _showNumberPad = false);
+            }),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+            child: GestureDetector(
+              onTap: () => _transfer(wallets),
+              child: Container(height: 56, width: double.infinity,
+                decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
+                  boxShadow: [BoxShadow(color: AppTheme.primary.withValues(alpha: 0.3), blurRadius: 20, offset: const Offset(0, 8))]),
+                child: const Center(child: Text('Transfer',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)))),
+            ),
+          ),
+      ])),
+    );
+  }
+}
+
+class _NumberPad extends StatelessWidget {
+  final String amount;
+  final void Function(String) onKey;
+  final VoidCallback onDone;
+  const _NumberPad({required this.amount, required this.onKey, required this.onDone});
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = [
+      ['7','8','9','Empty'],
+      ['4','5','6','-'],
+      ['1','2','3','+'],
+      ['.','0','⌫','='],
+    ];
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(40)),
+        boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 40, offset: Offset(0, -10))],
+      ),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Center(child: Container(
+          width: 48, height: 5,
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(3),
+          ),
+        )),
+        const SizedBox(height: 16),
+        ...keys.map((row) => Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Row(children: row.map((k) {
+            final isOp = ['Empty','-','+','='].contains(k);
+            final isEquals = k == '=';
+            return Expanded(child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: GestureDetector(
+                onTap: () => onKey(k == '⌫' ? 'backspace' : k == 'Empty' ? 'empty' : k),
+                child: Container(
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: isEquals ? AppTheme.primary : (isOp ? const Color(0xFFE4EBEC) : const Color(0xFFF8F9FB)),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Center(child: k == '⌫'
+                    ? Icon(Icons.backspace_outlined, size: 22, color: isEquals ? Colors.white : AppTheme.onSurface)
+                    : Text(k, style: TextStyle(fontSize: isOp ? 18 : 22, fontWeight: FontWeight.w600, color: isEquals ? Colors.white : AppTheme.onSurface))),
+                ),
+              ),
+            ));
+          }).toList()),
+        )),
+        const SizedBox(height: 8),
+        GestureDetector(
+          onTap: onDone,
+          child: Container(
+            height: 56, width: double.infinity,
+            decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
+              boxShadow: [BoxShadow(color: AppTheme.primary.withValues(alpha: 0.3), blurRadius: 16, offset: const Offset(0, 8))]),
+            child: const Center(child: Text('Done', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white))),
           ),
         ),
-      ])),
+      ]),
     );
   }
 }
@@ -195,10 +394,10 @@ class _WalletCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 8)]),
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
         child: Row(children: [
           Container(width: 48, height: 48, decoration: BoxDecoration(
-              color: wallet != null ? AppTheme.secondary.withOpacity(0.1) : Colors.red.withOpacity(0.1),
+              color: wallet != null ? AppTheme.secondary.withValues(alpha: 0.1) : Colors.red.withValues(alpha: 0.1),
               shape: BoxShape.circle),
             child: Icon(wallet != null ? Icons.account_balance_wallet_rounded : Icons.help_outline_rounded,
               color: wallet != null ? AppTheme.secondary : Colors.red, size: 24)),
