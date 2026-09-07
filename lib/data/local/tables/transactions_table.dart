@@ -8,6 +8,7 @@ class Transactions extends Table {
   TextColumn get accountId => text()();
   TextColumn get note => text().nullable()();
   DateTimeColumn get date => dateTime()();
+  TextColumn get receiptImagePath => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};

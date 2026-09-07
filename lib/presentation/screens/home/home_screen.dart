@@ -7,6 +7,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart' as tx;
 import '../../../domain/models/wallet.dart' as wl;
+import '../../widgets/settings_icon_button.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -110,11 +111,14 @@ class _HeaderState extends State<_Header> {
                 : null,
           ),
           const SizedBox(width: 12),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('WELCOME BACK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
-                letterSpacing: 1.5, color: AppTheme.onSurfaceVariant)),
-            Text(_profileName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
-          ]),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('WELCOME BACK', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
+                  letterSpacing: 1.5, color: AppTheme.onSurfaceVariant)),
+              Text(_profileName, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
+            ]),
+          ),
+          const SettingsIconButton(),
         ],
       ),
     );

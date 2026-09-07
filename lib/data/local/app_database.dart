@@ -14,7 +14,16 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onUpgrade: (m, from, to) async {
+      if (from == 1) {
+        await m.addColumn(transactions, transactions.receiptImagePath);
+      }
+    },
+  );
 
   Future<void> deleteAllData() async {
     await transaction(() async {

@@ -46,9 +46,15 @@ class $TransactionsTable extends Transactions
   late final GeneratedColumn<DateTime> date = GeneratedColumn<DateTime>(
       'date', aliasedName, false,
       type: DriftSqlType.dateTime, requiredDuringInsert: true);
+  static const VerificationMeta _receiptImagePathMeta =
+      const VerificationMeta('receiptImagePath');
+  @override
+  late final GeneratedColumn<String> receiptImagePath = GeneratedColumn<String>(
+      'receipt_image_path', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
   @override
   List<GeneratedColumn> get $columns =>
-      [id, type, amount, category, accountId, note, date];
+      [id, type, amount, category, accountId, note, date, receiptImagePath];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -98,6 +104,12 @@ class $TransactionsTable extends Transactions
     } else if (isInserting) {
       context.missing(_dateMeta);
     }
+    if (data.containsKey('receipt_image_path')) {
+      context.handle(
+          _receiptImagePathMeta,
+          receiptImagePath.isAcceptableOrUnknown(
+              data['receipt_image_path']!, _receiptImagePathMeta));
+    }
     return context;
   }
 
@@ -121,6 +133,8 @@ class $TransactionsTable extends Transactions
           .read(DriftSqlType.string, data['${effectivePrefix}note']),
       date: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}date'])!,
+      receiptImagePath: attachedDatabase.typeMapping.read(
+          DriftSqlType.string, data['${effectivePrefix}receipt_image_path']),
     );
   }
 
@@ -138,6 +152,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
   final String accountId;
   final String? note;
   final DateTime date;
+  final String? receiptImagePath;
   const Transaction(
       {required this.id,
       required this.type,
@@ -145,7 +160,8 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       required this.category,
       required this.accountId,
       this.note,
-      required this.date});
+      required this.date,
+      this.receiptImagePath});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
@@ -158,6 +174,9 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       map['note'] = Variable<String>(note);
     }
     map['date'] = Variable<DateTime>(date);
+    if (!nullToAbsent || receiptImagePath != null) {
+      map['receipt_image_path'] = Variable<String>(receiptImagePath);
+    }
     return map;
   }
 
@@ -170,6 +189,9 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       accountId: Value(accountId),
       note: note == null && nullToAbsent ? const Value.absent() : Value(note),
       date: Value(date),
+      receiptImagePath: receiptImagePath == null && nullToAbsent
+          ? const Value.absent()
+          : Value(receiptImagePath),
     );
   }
 
@@ -184,6 +206,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       accountId: serializer.fromJson<String>(json['accountId']),
       note: serializer.fromJson<String?>(json['note']),
       date: serializer.fromJson<DateTime>(json['date']),
+      receiptImagePath: serializer.fromJson<String?>(json['receiptImagePath']),
     );
   }
   @override
@@ -197,6 +220,7 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       'accountId': serializer.toJson<String>(accountId),
       'note': serializer.toJson<String?>(note),
       'date': serializer.toJson<DateTime>(date),
+      'receiptImagePath': serializer.toJson<String?>(receiptImagePath),
     };
   }
 
@@ -207,7 +231,8 @@ class Transaction extends DataClass implements Insertable<Transaction> {
           String? category,
           String? accountId,
           Value<String?> note = const Value.absent(),
-          DateTime? date}) =>
+          DateTime? date,
+          Value<String?> receiptImagePath = const Value.absent()}) =>
       Transaction(
         id: id ?? this.id,
         type: type ?? this.type,
@@ -216,6 +241,9 @@ class Transaction extends DataClass implements Insertable<Transaction> {
         accountId: accountId ?? this.accountId,
         note: note.present ? note.value : this.note,
         date: date ?? this.date,
+        receiptImagePath: receiptImagePath.present
+            ? receiptImagePath.value
+            : this.receiptImagePath,
       );
   Transaction copyWithCompanion(TransactionsCompanion data) {
     return Transaction(
@@ -226,6 +254,9 @@ class Transaction extends DataClass implements Insertable<Transaction> {
       accountId: data.accountId.present ? data.accountId.value : this.accountId,
       note: data.note.present ? data.note.value : this.note,
       date: data.date.present ? data.date.value : this.date,
+      receiptImagePath: data.receiptImagePath.present
+          ? data.receiptImagePath.value
+          : this.receiptImagePath,
     );
   }
 
@@ -238,14 +269,15 @@ class Transaction extends DataClass implements Insertable<Transaction> {
           ..write('category: $category, ')
           ..write('accountId: $accountId, ')
           ..write('note: $note, ')
-          ..write('date: $date')
+          ..write('date: $date, ')
+          ..write('receiptImagePath: $receiptImagePath')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, type, amount, category, accountId, note, date);
+  int get hashCode => Object.hash(
+      id, type, amount, category, accountId, note, date, receiptImagePath);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -256,7 +288,8 @@ class Transaction extends DataClass implements Insertable<Transaction> {
           other.category == this.category &&
           other.accountId == this.accountId &&
           other.note == this.note &&
-          other.date == this.date);
+          other.date == this.date &&
+          other.receiptImagePath == this.receiptImagePath);
 }
 
 class TransactionsCompanion extends UpdateCompanion<Transaction> {
@@ -267,6 +300,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
   final Value<String> accountId;
   final Value<String?> note;
   final Value<DateTime> date;
+  final Value<String?> receiptImagePath;
   final Value<int> rowid;
   const TransactionsCompanion({
     this.id = const Value.absent(),
@@ -276,6 +310,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     this.accountId = const Value.absent(),
     this.note = const Value.absent(),
     this.date = const Value.absent(),
+    this.receiptImagePath = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   TransactionsCompanion.insert({
@@ -286,6 +321,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     required String accountId,
     this.note = const Value.absent(),
     required DateTime date,
+    this.receiptImagePath = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
         type = Value(type),
@@ -301,6 +337,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     Expression<String>? accountId,
     Expression<String>? note,
     Expression<DateTime>? date,
+    Expression<String>? receiptImagePath,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -311,6 +348,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
       if (accountId != null) 'account_id': accountId,
       if (note != null) 'note': note,
       if (date != null) 'date': date,
+      if (receiptImagePath != null) 'receipt_image_path': receiptImagePath,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -323,6 +361,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
       Value<String>? accountId,
       Value<String?>? note,
       Value<DateTime>? date,
+      Value<String?>? receiptImagePath,
       Value<int>? rowid}) {
     return TransactionsCompanion(
       id: id ?? this.id,
@@ -332,6 +371,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
       accountId: accountId ?? this.accountId,
       note: note ?? this.note,
       date: date ?? this.date,
+      receiptImagePath: receiptImagePath ?? this.receiptImagePath,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -360,6 +400,9 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
     if (date.present) {
       map['date'] = Variable<DateTime>(date.value);
     }
+    if (receiptImagePath.present) {
+      map['receipt_image_path'] = Variable<String>(receiptImagePath.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -376,6 +419,7 @@ class TransactionsCompanion extends UpdateCompanion<Transaction> {
           ..write('accountId: $accountId, ')
           ..write('note: $note, ')
           ..write('date: $date, ')
+          ..write('receiptImagePath: $receiptImagePath, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -954,6 +998,7 @@ typedef $$TransactionsTableCreateCompanionBuilder = TransactionsCompanion
   required String accountId,
   Value<String?> note,
   required DateTime date,
+  Value<String?> receiptImagePath,
   Value<int> rowid,
 });
 typedef $$TransactionsTableUpdateCompanionBuilder = TransactionsCompanion
@@ -965,6 +1010,7 @@ typedef $$TransactionsTableUpdateCompanionBuilder = TransactionsCompanion
   Value<String> accountId,
   Value<String?> note,
   Value<DateTime> date,
+  Value<String?> receiptImagePath,
   Value<int> rowid,
 });
 
@@ -997,6 +1043,10 @@ class $$TransactionsTableFilterComposer
 
   ColumnFilters<DateTime> get date => $composableBuilder(
       column: $table.date, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get receiptImagePath => $composableBuilder(
+      column: $table.receiptImagePath,
+      builder: (column) => ColumnFilters(column));
 }
 
 class $$TransactionsTableOrderingComposer
@@ -1028,6 +1078,10 @@ class $$TransactionsTableOrderingComposer
 
   ColumnOrderings<DateTime> get date => $composableBuilder(
       column: $table.date, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get receiptImagePath => $composableBuilder(
+      column: $table.receiptImagePath,
+      builder: (column) => ColumnOrderings(column));
 }
 
 class $$TransactionsTableAnnotationComposer
@@ -1059,6 +1113,9 @@ class $$TransactionsTableAnnotationComposer
 
   GeneratedColumn<DateTime> get date =>
       $composableBuilder(column: $table.date, builder: (column) => column);
+
+  GeneratedColumn<String> get receiptImagePath => $composableBuilder(
+      column: $table.receiptImagePath, builder: (column) => column);
 }
 
 class $$TransactionsTableTableManager extends RootTableManager<
@@ -1094,6 +1151,7 @@ class $$TransactionsTableTableManager extends RootTableManager<
             Value<String> accountId = const Value.absent(),
             Value<String?> note = const Value.absent(),
             Value<DateTime> date = const Value.absent(),
+            Value<String?> receiptImagePath = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               TransactionsCompanion(
@@ -1104,6 +1162,7 @@ class $$TransactionsTableTableManager extends RootTableManager<
             accountId: accountId,
             note: note,
             date: date,
+            receiptImagePath: receiptImagePath,
             rowid: rowid,
           ),
           createCompanionCallback: ({
@@ -1114,6 +1173,7 @@ class $$TransactionsTableTableManager extends RootTableManager<
             required String accountId,
             Value<String?> note = const Value.absent(),
             required DateTime date,
+            Value<String?> receiptImagePath = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
               TransactionsCompanion.insert(
@@ -1124,6 +1184,7 @@ class $$TransactionsTableTableManager extends RootTableManager<
             accountId: accountId,
             note: note,
             date: date,
+            receiptImagePath: receiptImagePath,
             rowid: rowid,
           ),
           withReferenceMapper: (p0) => p0

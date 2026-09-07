@@ -15,6 +15,7 @@ import '../../presentation/screens/home/transaction_details_screen.dart';
 import '../../presentation/screens/wallet/wallet_screen.dart';
 import '../../presentation/screens/wallet/wallet_account_screen.dart';
 import '../../presentation/screens/settings/category_management_screen.dart';
+import '../../presentation/screens/prediction/prediction_dashboard_screen.dart';
 import '../../presentation/widgets/bottom_nav.dart';
 import '../../domain/models/transaction.dart';
 
@@ -29,6 +30,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/budget', builder: (c, s) => const BudgetScreen()),
           GoRoute(path: '/wallet', builder: (c, s) => const WalletScreen()),
           GoRoute(path: '/settings', builder: (c, s) => const SettingsScreen()),
+          GoRoute(path: '/prediction', builder: (c, s) => const PredictionDashboardScreen()),
         ],
       ),
       GoRoute(path: '/add-transaction', builder: (c, s) => const AddTransactionScreen()),
@@ -106,8 +108,10 @@ class MainShell extends StatelessWidget {
     final index = switch (location) {
       '/budget' => 1,
       '/wallet' => 3,
-      '/settings' => 4,
-      _ => 0,
+      '/prediction' => 4,
+      // Settings is reached via the top-right icon on the main screens now,
+      // not a bottom-nav tab, so it shouldn't light up any nav item.
+      _ => location == '/' ? 0 : -1,
     };
     return Scaffold(
       body: child,
@@ -119,7 +123,7 @@ class MainShell extends StatelessWidget {
             case 1: context.go('/budget');
             case 2: context.push('/add-transaction');
             case 3: context.go('/wallet');
-            case 4: context.go('/settings');
+            case 4: context.go('/prediction');
           }
         },
       ),

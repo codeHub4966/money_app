@@ -24,7 +24,7 @@ class BottomNavBar extends StatelessWidget {
           _NavItem(icon: Icons.bar_chart_rounded, index: 1, current: currentIndex, onTap: onTap),
           _FabItem(onTap: () => onTap(2)),
           _NavItem(icon: Icons.account_balance_wallet_rounded, index: 3, current: currentIndex, onTap: onTap),
-          _NavItem(icon: Icons.settings_rounded, index: 4, current: currentIndex, onTap: onTap),
+          _NavItem(icon: Icons.auto_graph_rounded, index: 4, current: currentIndex, onTap: onTap),
         ],
       ),
     );

@@ -33,6 +33,7 @@ class LocalTransactionRepository implements ITransactionRepository {
         accountId: Value(t.accountId),
         note: Value(t.note),
         date: Value(t.date),
+        receiptImagePath: Value(t.receiptImagePath),
       ),
     );
   }
@@ -52,5 +53,6 @@ class LocalTransactionRepository implements ITransactionRepository {
         accountId: row.accountId,
         note: row.note,
         date: row.date,
+        receiptImagePath: row.receiptImagePath,
       );
 }

@@ -8,6 +8,7 @@ class Transaction {
   final String accountId;
   final String? note;
   final DateTime date;
+  final String? receiptImagePath;
 
   const Transaction({
     required this.id,
@@ -17,5 +18,6 @@ class Transaction {
     required this.accountId,
     this.note,
     required this.date,
+    this.receiptImagePath,
   });
 }

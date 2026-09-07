@@ -1,10 +1,15 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../domain/models/transaction.dart';
 import '../../../domain/models/wallet.dart';
 import '../../../domain/models/app_category.dart';
+import '../../../core/services/receipt_scanner_service.dart';
 import '../../providers/app_providers.dart';
 
 // Fixed colour palette cycled per category index
@@ -31,6 +36,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   late DateTime _date;
   bool _saving = false;
   bool _showNumberPad = false;
+  String? _receiptImagePath;
+  bool _scanningReceipt = false;
 
   @override
   void initState() {
@@ -51,6 +58,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     _amount = t != null ? t.amount.toStringAsFixed(2) : '';
     _noteCtrl = TextEditingController(text: t?.note ?? '');
     _date = t?.date ?? DateTime.now();
+    _receiptImagePath = t?.receiptImagePath;
 
     // Set initial category: use transaction's category or first in list
     if (t?.category != null) {
@@ -200,14 +208,23 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     }
     newBalance += _type == TransactionType.income ? amount : -amount;
 
+    final transactionId = widget.transaction?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
+    String? savedReceiptPath;
+
+    // Save receipt image to permanent storage if exists
+    if (_receiptImagePath != null) {
+      savedReceiptPath = await _saveReceiptImage(_receiptImagePath!, transactionId);
+    }
+
     await txRepo.add(Transaction(
-      id: widget.transaction?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      id: transactionId,
       type: _type,
       amount: amount,
       category: _category,
       accountId: _account,
       note: _noteCtrl.text.isEmpty ? null : _noteCtrl.text,
       date: _date,
+      receiptImagePath: savedReceiptPath,
     ));
 
     await walletRepo.add(Wallet(
@@ -215,6 +232,217 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         balance: newBalance, includeInTotal: wallet.includeInTotal));
 
     if (mounted) context.pop();
+  }
+
+  Future<String?> _saveReceiptImage(String tempPath, String transactionId) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final receiptsDir = Directory('${dir.path}/receipts');
+      if (!await receiptsDir.exists()) {
+        await receiptsDir.create(recursive: true);
+      }
+
+      final fileName = '$transactionId.jpg';
+      final permanentPath = '${receiptsDir.path}/$fileName';
+      await File(tempPath).copy(permanentPath);
+
+      return permanentPath;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  Future<void> _scanReceipt() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+        ),
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                width: 48,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: AppTheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('Add Receipt',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
+            const SizedBox(height: 20),
+            _SourceOption(
+              icon: Icons.camera_alt,
+              label: 'Take Photo',
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const SizedBox(height: 12),
+            _SourceOption(
+              icon: Icons.photo_library,
+              label: 'Choose from Gallery',
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (source == null) return;
+
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: source, imageQuality: 100);
+
+    if (pickedFile == null) return;
+
+    // Show loading
+    setState(() => _scanningReceipt = true);
+
+    try {
+      final receiptData = await ReceiptScannerService.scanReceipt(pickedFile.path);
+
+      final key = _type == TransactionType.income ? 'income' : 'expense';
+      final categories = ref.read(categoriesProvider)[key] ?? [];
+      final existingLabels = categories.map((c) => c.label).toList();
+      final merchantHistory = _buildMerchantCategoryHistory();
+
+      final suggestedCategory = ReceiptScannerService.suggestCategory(
+        merchantName: receiptData.merchantName,
+        itemDescriptions: receiptData.itemDescriptions,
+        rawText: receiptData.rawText,
+        existingCategoryLabels: existingLabels,
+        merchantCategoryHistory: merchantHistory,
+      );
+
+      final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+      final matchedWallet = _matchWalletForPaymentKeyword(receiptData.detectedPaymentKeyword, wallets);
+
+      if (kDebugMode) {
+        debugPrint('========== RECEIPT OCR ==========');
+        debugPrint('Raw OCR:\n${receiptData.rawText}');
+        debugPrint('Merchant:\n${receiptData.merchantName}');
+        debugPrint('Items:\n${receiptData.itemDescriptions.join('\n')}');
+        debugPrint('Amount:\n${receiptData.amount}');
+        debugPrint('Date:\n${receiptData.date}');
+        debugPrint('Detected payment keyword:\n${receiptData.detectedPaymentKeyword}');
+        debugPrint('Current categories:\n${existingLabels.join(', ')}');
+        debugPrint('Suggested category:\n$suggestedCategory');
+        debugPrint('Matched wallet:\n${matchedWallet?.name}');
+        debugPrint('=================================');
+      }
+
+      setState(() {
+        _receiptImagePath = pickedFile.path;
+        _scanningReceipt = false;
+
+        // Auto-fill form fields
+        if (receiptData.amount != null) {
+          _amount = receiptData.amount!.toStringAsFixed(2);
+        }
+        if (receiptData.date != null) {
+          _date = receiptData.date!;
+        }
+        if (receiptData.suggestedNote != null && receiptData.suggestedNote!.isNotEmpty) {
+          _noteCtrl.text = receiptData.suggestedNote!;
+        }
+
+        // Auto-select category if suggested — only from categories that
+        // already exist in this form.
+        if (suggestedCategory != null) {
+          _category = suggestedCategory;
+        }
+
+        // Auto-select account if a payment keyword matched an existing wallet.
+        if (matchedWallet != null) {
+          _account = matchedWallet.id;
+        }
+      });
+
+      // Show success message
+      if (mounted) {
+        final details = <String>[];
+        if (receiptData.amount != null) details.add('RM ${receiptData.amount!.toStringAsFixed(2)}');
+        if (receiptData.merchantName != null) details.add(receiptData.merchantName!);
+        if (suggestedCategory != null) details.add(suggestedCategory);
+        if (matchedWallet != null) details.add(matchedWallet.name);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              receiptData.hasData
+                  ? 'Receipt scanned: ${details.join(' • ')}'
+                  : 'Receipt attached (no data detected)',
+            ),
+            backgroundColor: receiptData.hasData ? Colors.green : AppTheme.onSurfaceVariant,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _scanningReceipt = false;
+        _receiptImagePath = pickedFile.path; // Still attach the image
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not scan receipt, but image was attached')),
+        );
+      }
+    }
+  }
+
+  // Learns merchant -> category from past confirmed transactions, so a
+  // custom category (not in the built-in keyword list) still gets suggested
+  // next time the same merchant is scanned.
+  Map<String, String> _buildMerchantCategoryHistory() {
+    final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
+    final sorted = [...transactions]..sort((a, b) => b.date.compareTo(a.date));
+    final history = <String, String>{};
+    for (final t in sorted) {
+      final note = t.note;
+      if (note == null || note.isEmpty) continue;
+      final merchant = note.split(' — ').first.trim().toLowerCase();
+      if (merchant.isEmpty) continue;
+      history.putIfAbsent(merchant, () => t.category);
+    }
+    return history;
+  }
+
+  static const _specificPaymentBrands = {
+    'touch n go', 'grabpay', 'boost', 'shopeepay', 'maybank', 'cimb',
+    'public bank', 'hong leong', 'rhb', 'ambank',
+  };
+  static const _genericCardKeywords = {'visa', 'mastercard', 'debit', 'credit'};
+
+  Wallet? _matchWalletForPaymentKeyword(String? keyword, List<Wallet> wallets) {
+    if (keyword == null || wallets.isEmpty) return null;
+
+    if (keyword == 'cash') {
+      return wallets
+          .where((w) => w.type == WalletType.cash || w.name.toLowerCase().contains('cash'))
+          .firstOrNull;
+    }
+
+    if (_specificPaymentBrands.contains(keyword)) {
+      final exact = wallets.where((w) => w.name.toLowerCase() == keyword).firstOrNull;
+      if (exact != null) return exact;
+      return wallets
+          .where((w) => w.name.toLowerCase().contains(keyword) || keyword.contains(w.name.toLowerCase()))
+          .firstOrNull;
+    }
+
+    if (_genericCardKeywords.contains(keyword)) {
+      return wallets.where((w) => w.type == WalletType.bank || w.type == WalletType.credit).firstOrNull;
+    }
+
+    return null;
   }
 
   @override
@@ -662,8 +890,58 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   }
 
   Widget _buildAttachmentRow() {
+    final hasReceipt = _receiptImagePath != null;
+
     return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-      _AttachBtn(icon: Icons.camera_alt_outlined, label: 'Receipt'),
+      GestureDetector(
+        onTap: _scanningReceipt ? null : _scanReceipt,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: hasReceipt
+                ? AppTheme.primary.withValues(alpha: 0.1)
+                : AppTheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(20),
+            border: hasReceipt
+                ? Border.all(color: AppTheme.primary, width: 1.5)
+                : null,
+          ),
+          child: Row(children: [
+            if (_scanningReceipt)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(
+                hasReceipt ? Icons.receipt_long : Icons.camera_alt_outlined,
+                size: 20,
+                color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
+              ),
+            const SizedBox(width: 6),
+            Text(
+              _scanningReceipt
+                  ? 'Scanning...'
+                  : (hasReceipt ? 'Receipt Attached' : 'Add Receipt'),
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
+              ),
+            ),
+            if (hasReceipt && !_scanningReceipt) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () {
+                  setState(() => _receiptImagePath = null);
+                },
+                child: Icon(Icons.close, size: 18, color: AppTheme.primary),
+              ),
+            ],
+          ]),
+        ),
+      ),
     ]);
   }
 
@@ -852,19 +1130,44 @@ class _AccountSheetTile extends StatelessWidget {
   }
 }
 
-class _AttachBtn extends StatelessWidget {
+class _SourceOption extends StatelessWidget {
   final IconData icon;
   final String label;
-  const _AttachBtn({required this.icon, required this.label});
+  final VoidCallback onTap;
+  const _SourceOption({required this.icon, required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Row(children: [
-      Icon(icon, size: 20, color: AppTheme.onSurfaceVariant),
-      const SizedBox(width: 6),
-      Text(label, style: const TextStyle(
-          fontSize: 14, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
-    ]);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        decoration: BoxDecoration(
+          color: AppTheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: AppTheme.primary, size: 24),
+          ),
+          const SizedBox(width: 16),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: AppTheme.onSurface,
+            ),
+          ),
+        ]),
+      ),
+    );
   }
 }
 
