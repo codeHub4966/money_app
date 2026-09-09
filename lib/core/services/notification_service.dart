@@ -102,6 +102,33 @@ class NotificationService {
   Future<void> cancelReminder() async {
     await _notificationsPlugin.cancel(0);
   }
+
+  // Fires an immediate alert for an unusual-spending day or a new/updated
+  // smart insight. [id] should be a stable hash of whatever the caller is
+  // deduplicating on, so re-showing the same alert just replaces it instead
+  // of stacking duplicates.
+  Future<void> showInsightNotification({
+    required int id,
+    required String title,
+    required String body,
+  }) async {
+    const androidDetails = AndroidNotificationDetails(
+      'smart_insights',
+      'Smart Insights',
+      channelDescription: 'Alerts for unusual spending days and new spending insights',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    await _notificationsPlugin.show(
+      id,
+      title,
+      body,
+      const NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(),
+      ),
+    );
+  }
 }
 
 class ReminderPermissionStatus {

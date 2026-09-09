@@ -141,6 +141,7 @@ class WalletScreen extends ConsumerWidget {
                       ...entry.value.map((w) => Padding(
                         padding: const EdgeInsets.only(bottom: 16),
                         child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
                           onTap: () => context.push('/wallet-account',
                             extra: {'id': w.id, 'name': w.name, 'type': w.type.name, 'balance': w.balance, 'includeInTotal': w.includeInTotal}),
                           child: Row(children: [

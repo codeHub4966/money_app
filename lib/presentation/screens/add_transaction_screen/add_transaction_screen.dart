@@ -10,6 +10,7 @@ import '../../../domain/models/transaction.dart';
 import '../../../domain/models/wallet.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../core/services/receipt_scanner_service.dart';
+import '../../../core/services/receipt_enrichment_service.dart';
 import '../../providers/app_providers.dart';
 
 // Fixed colour palette cycled per category index
@@ -38,6 +39,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   bool _showNumberPad = false;
   String? _receiptImagePath;
   bool _scanningReceipt = false;
+  bool _enhancingWithAi = false;
 
   @override
   void initState() {
@@ -313,7 +315,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       final existingLabels = categories.map((c) => c.label).toList();
       final merchantHistory = _buildMerchantCategoryHistory();
 
-      final suggestedCategory = ReceiptScannerService.suggestCategory(
+      final (suggestedCategory, categoryConfidence) = ReceiptScannerService.suggestCategory(
         merchantName: receiptData.merchantName,
         itemDescriptions: receiptData.itemDescriptions,
         rawText: receiptData.rawText,
@@ -325,24 +327,26 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       final matchedWallet = _matchWalletForPaymentKeyword(receiptData.detectedPaymentKeyword, wallets);
 
       if (kDebugMode) {
-        debugPrint('========== RECEIPT OCR ==========');
+        debugPrint('========== RECEIPT OCR (local) ==========');
         debugPrint('Raw OCR:\n${receiptData.rawText}');
-        debugPrint('Merchant:\n${receiptData.merchantName}');
+        debugPrint('Merchant:\n${receiptData.merchantName} (${receiptData.merchantConfidence})');
         debugPrint('Items:\n${receiptData.itemDescriptions.join('\n')}');
-        debugPrint('Amount:\n${receiptData.amount}');
-        debugPrint('Date:\n${receiptData.date}');
+        debugPrint('Amount:\n${receiptData.amount} (${receiptData.amountConfidence})');
+        debugPrint('Date:\n${receiptData.date} (${receiptData.dateConfidence})');
         debugPrint('Detected payment keyword:\n${receiptData.detectedPaymentKeyword}');
         debugPrint('Current categories:\n${existingLabels.join(', ')}');
-        debugPrint('Suggested category:\n$suggestedCategory');
+        debugPrint('Suggested category:\n$suggestedCategory ($categoryConfidence)');
         debugPrint('Matched wallet:\n${matchedWallet?.name}');
-        debugPrint('=================================');
+        debugPrint('==========================================');
       }
 
+      // Auto-fill immediately from the local parser — this never waits on
+      // the network, exactly like before Gemini fallback was added. Any
+      // Gemini correction is patched in afterward as a second pass.
       setState(() {
         _receiptImagePath = pickedFile.path;
         _scanningReceipt = false;
 
-        // Auto-fill form fields
         if (receiptData.amount != null) {
           _amount = receiptData.amount!.toStringAsFixed(2);
         }
@@ -352,20 +356,14 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         if (receiptData.suggestedNote != null && receiptData.suggestedNote!.isNotEmpty) {
           _noteCtrl.text = receiptData.suggestedNote!;
         }
-
-        // Auto-select category if suggested — only from categories that
-        // already exist in this form.
         if (suggestedCategory != null) {
           _category = suggestedCategory;
         }
-
-        // Auto-select account if a payment keyword matched an existing wallet.
         if (matchedWallet != null) {
           _account = matchedWallet.id;
         }
       });
 
-      // Show success message
       if (mounted) {
         final details = <String>[];
         if (receiptData.amount != null) details.add('RM ${receiptData.amount!.toStringAsFixed(2)}');
@@ -384,9 +382,63 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
           ),
         );
       }
+
+      // Second pass: ReceiptEnrichmentService only actually calls the
+      // backend if a field is missing/low-confidence (see that class for
+      // the exact trigger rules); otherwise this resolves immediately with
+      // no network call. Never overwrites a high-confidence local field,
+      // and silently keeps the local result on any failure/timeout.
+      setState(() => _enhancingWithAi = true);
+      final enriched = await ReceiptEnrichmentService.enrich(
+        local: receiptData,
+        localCategory: suggestedCategory,
+        localCategoryConfidence: categoryConfidence,
+        localWallet: matchedWallet,
+        existingCategories: existingLabels,
+        existingWallets: wallets,
+      );
+      if (mounted) setState(() => _enhancingWithAi = false);
+
+      if (!enriched.usedAi) return;
+
+      if (kDebugMode) {
+        debugPrint('========== RECEIPT OCR (Gemini-enhanced) ==========');
+        debugPrint('Amount:\n${enriched.amount} (needsVerification: ${enriched.amountNeedsVerification})');
+        debugPrint('Date:\n${enriched.date}');
+        debugPrint('Merchant:\n${enriched.merchant}');
+        debugPrint('Category:\n${enriched.category}');
+        debugPrint('Wallet:\n${enriched.wallet?.name}');
+        debugPrint('====================================================');
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        if (enriched.amount != null) _amount = enriched.amount!.toStringAsFixed(2);
+        if (enriched.date != null) _date = enriched.date!;
+        if (enriched.merchant != null && receiptData.merchantConfidence != FieldConfidence.high) {
+          _noteCtrl.text = receiptData.itemDescriptions.isNotEmpty
+              ? '${enriched.merchant} — ${receiptData.itemDescriptions.join(', ')}'
+              : enriched.merchant!;
+        }
+        if (enriched.category != null) _category = enriched.category!;
+        if (enriched.wallet != null) _account = enriched.wallet!.id;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            enriched.amountNeedsVerification
+                ? 'AI-enhanced with Gemini — please verify the total'
+                : 'Receipt details enhanced with AI',
+          ),
+          backgroundColor: enriched.amountNeedsVerification ? Colors.orange : Colors.green,
+        ),
+      );
     } catch (e) {
       setState(() {
         _scanningReceipt = false;
+        _enhancingWithAi = false;
         _receiptImagePath = pickedFile.path; // Still attach the image
       });
 
@@ -891,10 +943,11 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
   Widget _buildAttachmentRow() {
     final hasReceipt = _receiptImagePath != null;
+    final isBusy = _scanningReceipt || _enhancingWithAi;
 
     return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       GestureDetector(
-        onTap: _scanningReceipt ? null : _scanReceipt,
+        onTap: isBusy ? null : _scanReceipt,
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           decoration: BoxDecoration(
@@ -907,7 +960,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
                 : null,
           ),
           child: Row(children: [
-            if (_scanningReceipt)
+            if (isBusy)
               const SizedBox(
                 width: 20,
                 height: 20,
@@ -923,14 +976,14 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             Text(
               _scanningReceipt
                   ? 'Scanning...'
-                  : (hasReceipt ? 'Receipt Attached' : 'Add Receipt'),
+                  : (_enhancingWithAi ? 'Verifying...' : (hasReceipt ? 'Receipt Attached' : 'Add Receipt')),
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
               ),
             ),
-            if (hasReceipt && !_scanningReceipt) ...[
+            if (hasReceipt && !isBusy) ...[
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: () {

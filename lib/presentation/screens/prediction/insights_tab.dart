@@ -30,11 +30,23 @@ class InsightsTab extends ConsumerStatefulWidget {
 class _InsightsTabState extends ConsumerState<InsightsTab> {
   String _trendView = 'daily'; // 'daily' | 'weekly'
   int? _selectedIndex;
+  final PageController _spikeController = PageController();
+  int _spikePage = 0;
 
   @override
   void didUpdateWidget(covariant InsightsTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.month != widget.month) _selectedIndex = null;
+    if (oldWidget.month != widget.month) {
+      _selectedIndex = null;
+      _spikePage = 0;
+      if (_spikeController.hasClients) _spikeController.jumpToPage(0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _spikeController.dispose();
+    super.dispose();
   }
 
   void _setTrendView(String v) {
@@ -172,7 +184,7 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
               top: 4,
               child: _chip('Spent so far', rm(data.spent), light: true),
             ),
-            Positioned(right: 0, top: 0, child: _chip('Projected', rm(fc.projected), light: false)),
+            Positioned(right: 10, top: 16, child: _chip('Projected', rm(fc.projected), light: false)),
           ]),
         ),
       ]),
@@ -302,7 +314,7 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
       physics: const NeverScrollableScrollPhysics(),
       crossAxisSpacing: 12,
       mainAxisSpacing: 12,
-      childAspectRatio: 1.55,
+      childAspectRatio: 1.4,
       children: [
         _statCard('AVERAGE / DAY', rm(data.avgDay),
             data.prevAvgDaySub ?? 'No data from last month yet.'),
@@ -350,22 +362,22 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
     final top = data.topCategory!;
     return _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('TOP CATEGORY', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1.1, color: AppTheme.onSurfaceVariant)),
-      const SizedBox(height: 6),
+      const SizedBox(height: 4),
       Row(children: [
-        Text(categoryEmoji(allCats, top.label), style: const TextStyle(fontSize: 20)),
-        const SizedBox(width: 7),
-        Expanded(child: Text(top.label, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: Color(0xFF1A1C2E)),
+        Text(categoryEmoji(allCats, top.label), style: const TextStyle(fontSize: 18)),
+        const SizedBox(width: 6),
+        Expanded(child: Text(top.label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Color(0xFF1A1C2E)),
             maxLines: 1, overflow: TextOverflow.ellipsis)),
       ]),
-      const SizedBox(height: 9),
+      const SizedBox(height: 6),
       ClipRRect(
         borderRadius: BorderRadius.circular(3),
-        child: LinearProgressIndicator(value: top.pct / 100, minHeight: 5, backgroundColor: const Color(0xFFEDEFF6),
+        child: LinearProgressIndicator(value: top.pct / 100, minHeight: 4, backgroundColor: const Color(0xFFEDEFF6),
             valueColor: AlwaysStoppedAnimation(top.color)),
       ),
-      const SizedBox(height: 6),
+      const SizedBox(height: 4),
       Expanded(child: Text('${rm(top.value)} · ${top.pct.round()}% of total spend',
-          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant, height: 1.35),
+          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant, height: 1.25),
           maxLines: 2, overflow: TextOverflow.ellipsis)),
     ]));
   }
@@ -434,79 +446,147 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
       ]);
 
   // ─────────────────────────── Unusual spending days ───────────────────────────
+  // A swipeable carousel of alert cards (one per flagged day) with a page-dot
+  // indicator, matching the redesigned "unusual spending" reference layout.
 
   Widget _buildSpikesCard(_MonthData data, Map<String, List<AppCategory>> allCats) {
-    final spikeSum = data.spikes.fold(0.0, (s, r) => s + r.amount);
-    return _card(
-      color: const Color(0xFF00113A),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(width: 34, height: 34,
-              decoration: BoxDecoration(color: _bad, borderRadius: BorderRadius.circular(12)),
-              child: const Icon(Icons.priority_high_rounded, color: Colors.white, size: 20)),
-          const SizedBox(width: 11),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('${data.spikes.length} unusual spending day${data.spikes.length == 1 ? '' : 's'}',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white)),
-            Text('${rm(spikeSum)} of ${rm(data.spent)} came from ${data.spikes.length == 1 ? 'this day' : 'these days'}',
-                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Color(0xFF93C5FD))),
-          ])),
-        ]),
-        for (final s in data.spikes) Container(
-          padding: const EdgeInsets.symmetric(vertical: 13),
-          decoration: const BoxDecoration(border: Border(top: BorderSide(color: Colors.white12))),
-          child: Row(children: [
-            Container(width: 32, height: 32,
-                decoration: BoxDecoration(color: Colors.white.withOpacity(0.12), borderRadius: BorderRadius.circular(11)),
-                alignment: Alignment.center,
-                child: Text(categoryEmoji(allCats, s.topCategory), style: const TextStyle(fontSize: 16))),
-            const SizedBox(width: 11),
-            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('${_dowLabel(s.date)}, ${s.date.day} ${kMonthNames[s.date.month - 1]}',
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.white)),
-              Text('Mostly ${s.topCategory.toLowerCase()} · ${rm(s.amount - data.avgDay)} above a usual day',
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.white60)),
-            ])),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text(rm(s.amount), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Colors.white)),
-              Text('${(s.amount / data.avgDay).toStringAsFixed(1)}× AVG',
-                  style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: Color(0xFFFF9C93))),
-            ]),
-          ]),
+    final spikes = data.spikes;
+    final page = _spikePage.clamp(0, spikes.length - 1);
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SizedBox(
+        height: 178,
+        child: PageView.builder(
+          controller: _spikeController,
+          itemCount: spikes.length,
+          onPageChanged: (i) => setState(() => _spikePage = i),
+          itemBuilder: (context, i) => _spikeAlertCard(spikes[i], data, allCats),
         ),
-        Padding(
-          padding: const EdgeInsets.only(top: 4),
-          child: Text('A day is flagged when it passes twice your ${data.daysElapsed}-day average (${rm(data.avgDay * 2)}). Detected locally, no data leaves the phone.',
-              style: const TextStyle(fontSize: 10, color: Colors.white54, height: 1.5)),
+      ),
+      if (spikes.length > 1) ...[
+        const SizedBox(height: 10),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          for (var i = 0; i < spikes.length; i++)
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              margin: const EdgeInsets.symmetric(horizontal: 3),
+              width: i == page ? 16 : 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: i == page ? _bad : const Color(0xFFE7BEC3),
+                borderRadius: BorderRadius.circular(3),
+              ),
+            ),
+        ]),
+      ],
+    ]);
+  }
+
+  Widget _spikeAlertCard(_Spike s, _MonthData data, Map<String, List<AppCategory>> allCats) {
+    final multiplier = data.avgDay > 0 ? s.amount / data.avgDay : 0.0;
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 2),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: [Color(0xFFFFE3E1), Color(0xFFFFC7C9)],
+        ),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(color: _bad, borderRadius: BorderRadius.circular(13)),
+            alignment: Alignment.center,
+            child: const Icon(Icons.priority_high_rounded, color: Colors.white, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text('UNUSUAL SPENDING', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 0.8, color: _bad)),
+              const SizedBox(height: 2),
+              Text('${_dowLabel(s.date)}, ${s.date.day} ${kMonthNames[s.date.month - 1]}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1A1C2E)),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 7),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(color: Colors.white.withOpacity(0.6), borderRadius: BorderRadius.circular(20)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text(categoryEmoji(allCats, s.topCategory), style: const TextStyle(fontSize: 12)),
+                  const SizedBox(width: 5),
+                  Flexible(child: Text('Mostly ${s.topCategory.toLowerCase()}',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF1A1C2E)),
+                      maxLines: 1, overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ]),
+          ),
+          const SizedBox(width: 8),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
+            const Text('AMOUNT', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1, color: Color(0xFF6B5658))),
+            const SizedBox(height: 4),
+            Text(rm(s.amount), style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w800, color: Color(0xFF1A1C2E))),
+            const SizedBox(height: 3),
+            Text('${multiplier.toStringAsFixed(1)}× above\nyour average', textAlign: TextAlign.right,
+                style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: _bad, height: 1.3)),
+          ]),
+        ]),
+        const SizedBox(height: 12),
+        Text(
+          'You spent ${rm(s.amount)} on this day, which is ${multiplier.toStringAsFixed(1)}× above your average (${rm(data.avgDay)}).',
+          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: Color(0xFF6B5658), height: 1.4),
+          maxLines: 2, overflow: TextOverflow.ellipsis,
         ),
       ]),
     );
   }
 
   // ─────────────────────────── Smart insights ───────────────────────────
+  // Each insight is its own tinted, icon-badged tile instead of a dot+text
+  // row inside one shared card.
 
   Widget _buildInsightsCard(_MonthData data) {
-    return _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         const Text('Smart insights', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppTheme.primary)),
         const Spacer(),
         const Text('ON THIS DEVICE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1, color: AppTheme.onSurfaceVariant)),
       ]),
-      for (var i = 0; i < data.smartInsights.length; i++) Container(
-        padding: const EdgeInsets.symmetric(vertical: 13),
-        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: i == data.smartInsights.length - 1 ? Colors.transparent : const Color(0xFFEDEFF6)))),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(padding: const EdgeInsets.only(top: 5),
-              child: Container(width: 8, height: 8, decoration: BoxDecoration(color: data.smartInsights[i].dot, borderRadius: BorderRadius.circular(2)))),
-          const SizedBox(width: 11),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(data.smartInsights[i].text, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1A1C2E), height: 1.45)),
+      const SizedBox(height: 12),
+      for (var i = 0; i < data.smartInsights.length; i++)
+        Padding(
+          padding: EdgeInsets.only(bottom: i == data.smartInsights.length - 1 ? 0 : 10),
+          child: _insightTile(data.smartInsights[i]),
+        ),
+    ]);
+  }
+
+  Widget _insightTile(_Insight insight) {
+    final bg = insight.alert ? const Color(0xFFFFF3F2) : const Color(0xFFF3F8FE);
+    final badge = insight.alert ? _bad : AppTheme.secondary;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(16)),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        Container(
+          width: 38, height: 38,
+          decoration: BoxDecoration(color: badge, shape: BoxShape.circle),
+          alignment: Alignment.center,
+          child: Icon(insight.icon, color: Colors.white, size: 19),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(insight.text, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: Color(0xFF1A1C2E), height: 1.4)),
             const SizedBox(height: 4),
-            Text(data.smartInsights[i].rule, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.8, color: Color(0xFF9EA3B8))),
-          ])),
-        ]),
-      ),
-    ]));
+            Text(insight.rule, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 0.7, color: AppTheme.onSurfaceVariant)),
+          ]),
+        ),
+      ]),
+    );
   }
 }
 
@@ -555,10 +635,11 @@ class _TopCategory {
 }
 
 class _Insight {
-  final Color dot;
+  final IconData icon;
+  final bool alert;
   final String text;
   final String rule;
-  const _Insight({required this.dot, required this.text, required this.rule});
+  const _Insight({required this.icon, required this.alert, required this.text, required this.rule});
 }
 
 class _MonthData {
@@ -762,14 +843,16 @@ class _MonthData {
     if (pacePct != null) {
       final up = pacePct >= 0;
       insights.add(_Insight(
-        dot: up ? _bad : _good,
+        icon: up ? Icons.trending_up_rounded : Icons.trending_down_rounded,
+        alert: up,
         text: 'Your spending over the last 7 days is ${pacePct.abs().toStringAsFixed(0)}% ${up ? 'higher' : 'lower'} than earlier this month.',
         rule: 'LAST 7 DAYS ${rm(paceNow!)}/DAY VS ${rm(paceBefore!)}/DAY',
       ));
     }
     if (topCategory != null) {
       insights.add(_Insight(
-        dot: kCategoryPalette[0],
+        icon: Icons.shopping_bag_rounded,
+        alert: false,
         text: '${topCategory.label} is your highest spending category this month, at ${topCategory.pct.round()}% of total expenses.',
         rule: '${rm(topCategory.value)} OF ${rm(spent)}',
       ));
@@ -777,7 +860,8 @@ class _MonthData {
     if (spikes.isNotEmpty) {
       final s = spikes.first;
       insights.add(_Insight(
-        dot: _bad,
+        icon: Icons.priority_high_rounded,
+        alert: true,
         text: '${_dowLabel(s.date)}, ${s.date.day} ${kMonthNames[s.date.month - 1]} was an unusual day at ${rm(s.amount)}, about ${(s.amount / avgDay).toStringAsFixed(1)}× your normal daily spending.',
         rule: 'ABOVE THE ${rm(threshold)} UNUSUAL-DAY THRESHOLD',
       ));
@@ -786,7 +870,8 @@ class _MonthData {
       if (forecast.prevMonthTotal != null) {
         final diff = forecast.projected - forecast.prevMonthTotal!;
         insights.add(_Insight(
-          dot: AppTheme.secondary,
+          icon: (!forecast.flat && diff > 0) ? Icons.trending_up_rounded : Icons.trending_down_rounded,
+          alert: !forecast.flat && diff > 0,
           text: forecast.flat
               ? 'At the current pace the month ends near ${rm(forecast.projected)}, about the same as ${kMonthNames[prevMonthStart.month - 1]}.'
               : 'At the current pace the month ends near ${rm(forecast.projected)}, ${rm(diff.abs())} ${diff > 0 ? 'above' : 'below'} what you spent in ${kMonthNames[prevMonthStart.month - 1]}.',
@@ -794,7 +879,8 @@ class _MonthData {
         ));
       } else {
         insights.add(_Insight(
-          dot: AppTheme.secondary,
+          icon: Icons.trending_up_rounded,
+          alert: false,
           text: 'At the current pace the month ends near ${rm(forecast.projected)}.',
           rule: 'FORECAST FROM $daysElapsed DAYS OF TRANSACTIONS',
         ));
@@ -802,7 +888,8 @@ class _MonthData {
     } else if (!isCurrentMonth && prevMonthFullTotal != null) {
       final diff = spent - prevMonthFullTotal;
       insights.add(_Insight(
-        dot: AppTheme.secondary,
+        icon: diff > 0 ? Icons.trending_up_rounded : Icons.trending_down_rounded,
+        alert: diff > 0,
         text: 'You spent ${rm(spent)} in ${kMonthNames[month.month - 1]}, ${rm(diff.abs())} ${diff > 0 ? 'more' : 'less'} than ${kMonthNames[prevMonthStart.month - 1]}.',
         rule: '${kMonthNames[month.month - 1].toUpperCase()} VS ${kMonthNames[prevMonthStart.month - 1].toUpperCase()}',
       ));

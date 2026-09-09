@@ -4,6 +4,7 @@ import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/services/pin_service.dart';
 import 'core/services/notification_service.dart';
+import 'presentation/providers/insight_notification_provider.dart';
 import 'presentation/screens/settings/pin_screen.dart';
 
 void main() async {
@@ -166,6 +167,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
       );
     }
 
+    ref.watch(insightNotificationWatcherProvider);
     final router = ref.watch(appRouterProvider);
     return MaterialApp.router(
       title: 'Money App',

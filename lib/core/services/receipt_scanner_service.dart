@@ -1,5 +1,9 @@
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
+/// How much the local parser trusts a field it extracted.
+/// Used to decide whether the Gemini backend fallback should be consulted.
+enum FieldConfidence { high, low, missing }
+
 class ReceiptData {
   final double? amount;
   final DateTime? date;
@@ -8,6 +12,9 @@ class ReceiptData {
   final String? suggestedNote;
   final String? detectedPaymentKeyword;
   final String rawText;
+  final FieldConfidence amountConfidence;
+  final FieldConfidence dateConfidence;
+  final FieldConfidence merchantConfidence;
 
   ReceiptData({
     this.amount,
@@ -17,6 +24,9 @@ class ReceiptData {
     this.suggestedNote,
     this.detectedPaymentKeyword,
     required this.rawText,
+    this.amountConfidence = FieldConfidence.missing,
+    this.dateConfidence = FieldConfidence.missing,
+    this.merchantConfidence = FieldConfidence.missing,
   });
 
   bool get hasData => amount != null || date != null || merchantName != null;
@@ -26,6 +36,7 @@ class ReceiptScannerService {
   static final _textRecognizer = TextRecognizer();
 
   static const int _minCategoryScore = 2;
+  static const int _highCategoryScore = 6;
 
   // Category keywords - used as default classification knowledge only.
   // Item extraction does NOT depend on this map (see _extractItemDescriptions).
@@ -46,13 +57,20 @@ class ReceiptScannerService {
       'mart', 'store', 'speedmart', '99speedmart', 'mydin', 'lotus', 'econsave',
       'vegetables', 'fruits', 'milk', 'eggs', 'bread', 'meat', 'seafood',
     ],
+    // Kept as its own bucket (rather than folded into "Shopping") because
+    // most user category sets have a dedicated "Clothing" label, and
+    // _matchExistingLabel() prefers an exact bucket-name-to-label match —
+    // a merged "Shopping" bucket would always win that exact match and
+    // fashion items would never resolve to "Clothing".
+    'Clothing': [
+      'uniqlo', 'zara', 'h&m', 'nike', 'adidas', 'fashion', 'clothing',
+      'apparel', 'shoes', 'bag', 'shirt', 'tee', 't-shirt', 'pants', 'pant',
+      'jeans', 'dress', 'skirt', 'jacket', 'sweater', 'hoodie', 'sneakers',
+      'sandals', 'watch', 'accessories', 'hat', 'cap', 'socks', 'underwear',
+      'belt', 'boutique',
+    ],
     'Shopping': [
-      // Fashion
-      'mall', 'shop', 'boutique', 'uniqlo', 'zara', 'h&m', 'nike',
-      'adidas', 'fashion', 'clothing', 'apparel', 'shoes', 'bag',
-      'shirt', 'tee', 't-shirt', 'pants', 'jeans', 'dress', 'skirt',
-      'jacket', 'sweater', 'hoodie', 'sneakers', 'sandals', 'watch',
-      'accessories', 'hat', 'cap', 'socks', 'underwear', 'belt',
+      'mall', 'shop', 'store',
       // Electronics & others
       'electronic', 'phone', 'laptop', 'gadget', 'computer', 'tablet',
       'headphone', 'speaker', 'camera', 'toy', 'book', 'stationery',
@@ -131,13 +149,13 @@ class ReceiptScannerService {
     try {
       final inputImage = InputImage.fromFilePath(imagePath);
       final recognizedText = await _textRecognizer.processImage(inputImage);
-      final rawText = recognizedText.text;
+      final rawText = _readingOrderText(recognizedText);
       final lines = rawText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
 
-      final merchantName = _extractMerchant(lines);
+      final (merchantName, merchantConfidence) = _extractMerchant(lines);
       final itemDescriptions = _extractItemDescriptions(lines, merchantName);
-      final amount = _extractAmount(lines);
-      final date = _extractDate(lines);
+      final (amount, amountConfidence) = _extractAmount(lines);
+      final (date, dateConfidence) = _extractDate(lines);
       final detectedPaymentKeyword = _detectPaymentKeyword(rawText);
       final suggestedNote = _buildNote(merchantName, itemDescriptions);
 
@@ -149,10 +167,38 @@ class ReceiptScannerService {
         suggestedNote: suggestedNote,
         detectedPaymentKeyword: detectedPaymentKeyword,
         rawText: rawText,
+        amountConfidence: amountConfidence,
+        dateConfidence: dateConfidence,
+        merchantConfidence: merchantConfidence,
       );
     } catch (e) {
       return ReceiptData(rawText: '');
     }
+  }
+
+  // ML Kit's own `RecognizedText.text` concatenates blocks in whatever
+  // order its internal grouping algorithm picked — that is NOT guaranteed
+  // to match top-to-bottom visual reading order. This is especially visible
+  // on receipts printed on security/watermark paper (a faint repeated
+  // background pattern), where the watermark's own detected text confuses
+  // the block grouping and can push a block that is visually near the top
+  // (e.g. the store name) later in the output. Re-deriving the text
+  // ourselves by explicitly sorting blocks/lines by their bounding-box Y
+  // position fixes this at the source, instead of guessing around
+  // already-scrambled text afterwards.
+  static String _readingOrderText(RecognizedText recognizedText) {
+    final blocks = [...recognizedText.blocks]
+      ..sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+
+    final buffer = StringBuffer();
+    for (final block in blocks) {
+      final lines = [...block.lines]
+        ..sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+      for (final line in lines) {
+        buffer.writeln(line.text);
+      }
+    }
+    return buffer.toString();
   }
 
   // Whole-word match so short keywords like "bar" or "cap" don't fire on
@@ -164,7 +210,7 @@ class ReceiptScannerService {
 
   // ─────────────────────────── Amount ───────────────────────────
 
-  static double? _extractAmount(List<String> lines) {
+  static (double?, FieldConfidence) _extractAmount(List<String> lines) {
     // Note: deliberately does NOT exclude tax/gst/sst — many Malaysian
     // receipts print the real grand total as "TOTAL (INCL. GST)" or
     // "TOTAL INCLUSIVE OF SST", and excluding those words caused the actual
@@ -198,14 +244,14 @@ class ReceiptScannerService {
 
         final kwMatch = keywordPattern.firstMatch(line)!;
         final afterKeyword = _extractFirstPrice(line.substring(kwMatch.end));
-        if (afterKeyword != null) return afterKeyword;
+        if (afterKeyword != null) return (afterKeyword, FieldConfidence.high);
 
         final anywhereOnLine = _extractFirstPrice(line);
-        if (anywhereOnLine != null) return anywhereOnLine;
+        if (anywhereOnLine != null) return (anywhereOnLine, FieldConfidence.high);
 
         if (i + 1 < lines.length && !exclusion.hasMatch(lines[i + 1])) {
           final nextLineAmount = _extractFirstPrice(lines[i + 1]);
-          if (nextLineAmount != null) return nextLineAmount;
+          if (nextLineAmount != null) return (nextLineAmount, FieldConfidence.high);
         }
       }
     }
@@ -214,7 +260,8 @@ class ReceiptScannerService {
     // all (OCR garbled the label, or the receipt phrases it unusually).
     // Rather than leave the amount blank, fall back to the largest money
     // amount on the receipt — it's usually the grand total since it's the
-    // sum of everything above it. This never overrides a keyword match.
+    // sum of everything above it. This never overrides a keyword match, and
+    // is marked low-confidence since it's a guess rather than a labelled total.
     final allAmounts = <double>[];
     for (final line in lines) {
       final price = _extractFirstPrice(line);
@@ -222,10 +269,10 @@ class ReceiptScannerService {
     }
     if (allAmounts.isNotEmpty) {
       allAmounts.sort();
-      return allAmounts.last;
+      return (allAmounts.last, FieldConfidence.low);
     }
 
-    return null;
+    return (null, FieldConfidence.missing);
   }
 
   static double? _extractFirstPrice(String text) {
@@ -269,21 +316,39 @@ class ReceiptScannerService {
     return d <= maxDay;
   }
 
-  static DateTime? _extractDate(List<String> lines) {
+  static (DateTime?, FieldConfidence) _extractDate(List<String> lines) {
     final labelPattern = RegExp(r'\bdate\b', caseSensitive: false);
     final labelLines = lines.where((l) => labelPattern.hasMatch(l));
     final otherLines = lines.where((l) => !labelPattern.hasMatch(l));
 
-    for (final line in [...labelLines, ...otherLines]) {
+    // A date found next to an explicit "date" label is high confidence;
+    // one inferred from an unlabelled line elsewhere on the receipt is not.
+    for (final line in labelLines) {
       final result = _tryParseDateFromLine(line);
-      if (result != null) return result;
+      if (result != null) return (result, FieldConfidence.high);
+    }
+    for (final line in otherLines) {
+      final result = _tryParseDateFromLine(line);
+      if (result != null) return (result, FieldConfidence.low);
     }
 
-    return null;
+    return (null, FieldConfidence.missing);
   }
 
   static DateTime? _tryParseDateFromLine(String line) {
-    final dmy = RegExp(r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b').firstMatch(line);
+    // '.' is included alongside '/' and '-' — dot-separated dates
+    // (05.09.2026) are common on Malaysian receipts too. A stray decimal
+    // price like "16.95" only has one separator, so it can't match this
+    // 3-group pattern.
+    //
+    // The leading anchor is a "not preceded by a digit" lookbehind rather
+    // than \b: digits and letters are both \w, so \b would refuse to match
+    // right after a label with no space before the date — a common OCR
+    // artifact (e.g. "Date05/09/2026" with the space dropped). The trailing
+    // \b is kept, since a date immediately followed by more digits (no
+    // separator) genuinely is ambiguous and should be rejected.
+    final dmy =
+        RegExp(r'(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})\b').firstMatch(line);
     if (dmy != null) {
       final p1 = int.parse(dmy.group(1)!);
       final p2 = int.parse(dmy.group(2)!);
@@ -296,7 +361,7 @@ class ReceiptScannerService {
       return null;
     }
 
-    final ymd = RegExp(r'\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b').firstMatch(line);
+    final ymd = RegExp(r'(?<!\d)(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})\b').firstMatch(line);
     if (ymd != null) {
       final year = int.parse(ymd.group(1)!);
       final month = int.parse(ymd.group(2)!);
@@ -306,7 +371,7 @@ class ReceiptScannerService {
     }
 
     final dmonthy = RegExp(
-      r'\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{2,4})\b',
+      r'(?<!\d)(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{2,4})\b',
       caseSensitive: false,
     ).firstMatch(line);
     if (dmonthy != null) {
@@ -344,14 +409,34 @@ class ReceiptScannerService {
   // only skip lines that are clearly not a business name (blank, or a
   // generic header like "TAX INVOICE"). Anything smarter than that started
   // second-guessing real merchant lines and picking an address line instead.
-  static String? _extractMerchant(List<String> lines) {
+  static (String?, FieldConfidence) _extractMerchant(List<String> lines) {
     for (final line in lines) {
       final trimmed = line.trim();
       if (trimmed.length < 2) continue;
       if (_genericHeaderPattern.hasMatch(trimmed)) continue;
-      return trimmed;
+
+      // Skip known metadata lines (tel/fax/email/GST no/SST no/reg no) that
+      // sometimes print above the store name — these are never a business
+      // name, so this only ever moves on to the next line, never guesses.
+      if (_metadataSkipPattern.hasMatch(trimmed)) continue;
+
+      final letterCount = trimmed.replaceAll(RegExp(r'[^a-zA-Z]'), '').length;
+
+      // A line with zero letters (a border/rule of dashes or asterisks, a
+      // barcode number, stray OCR noise from a logo graphic) can never be a
+      // business name — skip it rather than returning it as the merchant.
+      // Anything found by a line WITH letters is still returned even if
+      // short/noisy, just flagged low confidence instead of dropped —
+      // second-guessing further than that started picking address lines
+      // over real merchant lines.
+      if (letterCount == 0) continue;
+
+      final confidence = (trimmed.length >= 3 && letterCount >= 3)
+          ? FieldConfidence.high
+          : FieldConfidence.low;
+      return (trimmed, confidence);
     }
-    return null;
+    return (null, FieldConfidence.missing);
   }
 
   // ─────────────────────────── Item descriptions ───────────────────────────
@@ -371,8 +456,11 @@ class ReceiptScannerService {
       // Once we reach the totals/payment/footer section, item lines are done.
       if (_totalsSectionPattern.hasMatch(trimmed)) break;
 
+      // Trailing tax-code letters after the price (e.g. "12.50 SR", "89.90 Z")
+      // are common on Malaysian receipts and are tolerated here — otherwise
+      // the end-of-line anchor would reject the entire item line.
       final priceMatch = RegExp(
-        r'(?:rm|myr)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}\s*$',
+        r'(?:rm|myr)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}(?:\s*[A-Z*]{1,2})?\s*$',
         caseSensitive: false,
       ).firstMatch(trimmed);
       if (priceMatch == null) continue;
@@ -421,7 +509,7 @@ class ReceiptScannerService {
   /// name, existing category labels, and finally the raw OCR text as a weak
   /// fallback. When [existingCategoryLabels] is non-empty, only a label from
   /// that list is ever returned — this method never invents a category.
-  static String? suggestCategory({
+  static (String?, FieldConfidence) suggestCategory({
     String? merchantName,
     List<String> itemDescriptions = const [],
     String rawText = '',
@@ -432,7 +520,7 @@ class ReceiptScannerService {
       final learned = merchantCategoryHistory[merchantName.toLowerCase().trim()];
       if (learned != null &&
           (existingCategoryLabels.isEmpty || existingCategoryLabels.contains(learned))) {
-        return learned;
+        return (learned, FieldConfidence.high);
       }
     }
 
@@ -467,7 +555,7 @@ class ReceiptScannerService {
       }
     }
 
-    if (scores.isEmpty) return null;
+    if (scores.isEmpty) return (null, FieldConfidence.missing);
 
     final resolved = <String, int>{};
     for (final entry in scores.entries) {
@@ -478,11 +566,14 @@ class ReceiptScannerService {
       resolved[label] = (resolved[label] ?? 0) + entry.value;
     }
 
-    if (resolved.isEmpty) return null;
+    if (resolved.isEmpty) return (null, FieldConfidence.missing);
 
     final ranked = resolved.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
-    if (ranked.first.value < _minCategoryScore) return null;
-    return ranked.first.key;
+    if (ranked.first.value < _minCategoryScore) return (null, FieldConfidence.missing);
+
+    final confidence =
+        ranked.first.value >= _highCategoryScore ? FieldConfidence.high : FieldConfidence.low;
+    return (ranked.first.key, confidence);
   }
 
   // A built-in keyword-map key (e.g. "Transportation", "Healthcare") rarely
