@@ -13,8 +13,8 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   AndroidFlutterLocalNotificationsPlugin? get _androidPlugin =>
-      _notificationsPlugin
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      _notificationsPlugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
@@ -23,7 +23,8 @@ class NotificationService {
 
     const AndroidInitializationSettings androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
-    const DarwinInitializationSettings iosSettings = DarwinInitializationSettings(
+    const DarwinInitializationSettings iosSettings =
+        DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
       requestSoundPermission: true,
@@ -37,7 +38,8 @@ class NotificationService {
   Future<ReminderPermissionStatus> checkPermissions() async {
     final notif = await Permission.notification.status;
     final battery = await Permission.ignoreBatteryOptimizations.status;
-    final exactAlarm = await _androidPlugin?.canScheduleExactNotifications() ?? true;
+    final exactAlarm =
+        await _androidPlugin?.canScheduleExactNotifications() ?? true;
 
     return ReminderPermissionStatus(
       notification: notif.isGranted,
@@ -73,7 +75,8 @@ class NotificationService {
       scheduledDate = scheduledDate.add(const Duration(days: 1));
     }
 
-    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+    const AndroidNotificationDetails androidDetails =
+        AndroidNotificationDetails(
       'daily_reminder',
       'Daily Reminder',
       channelDescription: 'Reminds you to record your daily expenses',
@@ -81,7 +84,8 @@ class NotificationService {
       priority: Priority.high,
     );
 
-    final canExact = await _androidPlugin?.canScheduleExactNotifications() ?? false;
+    final canExact =
+        await _androidPlugin?.canScheduleExactNotifications() ?? false;
     final scheduleMode = canExact
         ? AndroidScheduleMode.exactAllowWhileIdle
         : AndroidScheduleMode.inexactAllowWhileIdle;
@@ -103,31 +107,51 @@ class NotificationService {
     await _notificationsPlugin.cancel(0);
   }
 
-  // Fires an immediate alert for an unusual-spending day or a new/updated
-  // smart insight. [id] should be a stable hash of whatever the caller is
-  // deduplicating on, so re-showing the same alert just replaces it instead
-  // of stacking duplicates.
-  Future<void> showInsightNotification({
+  // Schedules a one-off insight alert for [scheduledDate] (a local wall-clock
+  // time; converted to the device's zone internally) instead of showing it
+  // immediately. Used to silently delay the unusual-spending alert by a few
+  // minutes and to deliver the next-day financial summary at a fixed time.
+  // Re-scheduling with the same [id] replaces whatever was pending under it.
+  Future<void> scheduleInsightNotification({
     required int id,
     required String title,
     required String body,
+    required DateTime scheduledDate,
+    bool expandable = false,
   }) async {
-    const androidDetails = AndroidNotificationDetails(
+    final androidDetails = AndroidNotificationDetails(
       'smart_insights',
       'Smart Insights',
-      channelDescription: 'Alerts for unusual spending days and new spending insights',
+      channelDescription:
+          'Alerts for unusual spending days and new spending insights',
       importance: Importance.high,
       priority: Priority.high,
+      styleInformation: expandable ? BigTextStyleInformation(body) : null,
     );
-    await _notificationsPlugin.show(
+
+    final canExact =
+        await _androidPlugin?.canScheduleExactNotifications() ?? false;
+    final scheduleMode = canExact
+        ? AndroidScheduleMode.exactAllowWhileIdle
+        : AndroidScheduleMode.inexactAllowWhileIdle;
+
+    await _notificationsPlugin.zonedSchedule(
       id,
       title,
       body,
-      const NotificationDetails(
-        android: androidDetails,
-        iOS: DarwinNotificationDetails(),
-      ),
+      tz.TZDateTime.from(scheduledDate, tz.local),
+      NotificationDetails(
+          android: androidDetails, iOS: const DarwinNotificationDetails()),
+      androidScheduleMode: scheduleMode,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
     );
+  }
+
+  // Cancels a pending notification scheduled via [scheduleInsightNotification]
+  // that hasn't fired yet.
+  Future<void> cancelInsightNotification(int id) async {
+    await _notificationsPlugin.cancel(id);
   }
 }
 
@@ -142,5 +166,6 @@ class ReminderPermissionStatus {
     required this.batteryOptimizationExempt,
   });
 
-  bool get allGranted => notification && exactAlarm && batteryOptimizationExempt;
+  bool get allGranted =>
+      notification && exactAlarm && batteryOptimizationExempt;
 }

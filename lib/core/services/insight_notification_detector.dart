@@ -1,4 +1,5 @@
 import '../../domain/models/transaction.dart' as tx;
+import '../utils/category_change.dart';
 import '../utils/spending_anomaly.dart';
 
 // Lightweight, standalone re-derivation of "is this day unusual" / "what are
@@ -24,6 +25,7 @@ class SpendingSnapshot {
   final String? topCategory;
   final double? topCategoryPct;
   final double? forecastProjected;
+  final CategoryChange? categoryChange;
   const SpendingSnapshot({
     required this.avgDay,
     required this.daysElapsed,
@@ -32,6 +34,7 @@ class SpendingSnapshot {
     this.topCategory,
     this.topCategoryPct,
     this.forecastProjected,
+    this.categoryChange,
   });
 }
 
@@ -101,6 +104,16 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
     forecastProjected = spent + pace * (daysInMonth - daysElapsed);
   }
 
+  // Leading category vs the same period last month.
+  final prevMonth = DateTime(month.year, month.month - 1, 1);
+  final prevMonthTx =
+      all.where((t) => _isSpendableExpense(t, prevMonth)).toList();
+  final categoryChange = detectCategoryChange(
+    currentMonthTx: monthTx,
+    previousMonthTx: prevMonthTx,
+    daysElapsed: daysElapsed,
+  );
+
   return SpendingSnapshot(
     avgDay: avgDay,
     daysElapsed: daysElapsed,
@@ -109,5 +122,6 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
     topCategory: topCategory,
     topCategoryPct: topCategoryPct,
     forecastProjected: forecastProjected,
+    categoryChange: categoryChange,
   );
 }

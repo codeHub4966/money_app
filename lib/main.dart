@@ -4,6 +4,7 @@ import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/services/pin_service.dart';
 import 'core/services/notification_service.dart';
+import 'presentation/providers/app_providers.dart';
 import 'presentation/providers/insight_notification_provider.dart';
 import 'presentation/screens/settings/pin_screen.dart';
 
@@ -20,7 +21,8 @@ class MoneyApp extends ConsumerStatefulWidget {
   ConsumerState<MoneyApp> createState() => _MoneyAppState();
 }
 
-class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver {
+class _MoneyAppState extends ConsumerState<MoneyApp>
+    with WidgetsBindingObserver {
   bool _isUnlocked = false;
   bool _isLoading = true;
   String? _savedPin;
@@ -44,11 +46,12 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    
+
     // Do not lock the app if we are currently showing the biometric prompt
     if (PinService.isAuthenticating) return;
 
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
       _lockIfRequired();
     } else if (state == AppLifecycleState.resumed) {
       _checkSecurity();
@@ -62,6 +65,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
     if (pin != null || (bio && canUseBio)) {
       if (mounted) {
         setState(() => _isUnlocked = false);
+        ref.read(isAppUnlockedProvider.notifier).state = false;
       }
     }
   }
@@ -80,6 +84,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
       _isLoading = false;
       _isUnlocked = !requiresAuth; // Unlock immediately if no security
     });
+    ref.read(isAppUnlockedProvider.notifier).state = _isUnlocked;
 
     // Auto-trigger biometric on launch if it's available and no PIN is set
     if (!_isUnlocked && bioEnabled && canUseBio && pin == null) {
@@ -94,6 +99,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
 
   void _unlock() {
     setState(() => _isUnlocked = true);
+    ref.read(isAppUnlockedProvider.notifier).state = true;
   }
 
   @override
@@ -120,11 +126,18 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.fingerprint_rounded, size: 72, color: AppTheme.secondary),
+                const Icon(Icons.fingerprint_rounded,
+                    size: 72, color: AppTheme.secondary),
                 const SizedBox(height: 24),
-                const Text('Biometric Required', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
+                const Text('Biometric Required',
+                    style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: AppTheme.onSurface)),
                 const SizedBox(height: 8),
-                const Text('Authenticate to access your data', style: TextStyle(fontSize: 14, color: AppTheme.onSurfaceVariant)),
+                const Text('Authenticate to access your data',
+                    style: TextStyle(
+                        fontSize: 14, color: AppTheme.onSurfaceVariant)),
                 const SizedBox(height: 32),
                 ElevatedButton.icon(
                   onPressed: _tryBiometric,
@@ -133,8 +146,10 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppTheme.secondary,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 32, vertical: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
                   ),
                 ),
               ],
@@ -177,4 +192,3 @@ class _MoneyAppState extends ConsumerState<MoneyApp> with WidgetsBindingObserver
     );
   }
 }
-

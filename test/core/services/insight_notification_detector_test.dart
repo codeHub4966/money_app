@@ -101,4 +101,50 @@ void main() {
     expect(snapshot, isNotNull);
     expect(snapshot!.spikes, isEmpty);
   });
+
+  group('categoryChange', () {
+    test('flags a leading-category change vs the same period last month', () {
+      final transactions = [
+        // Current month (March): Electronics leads.
+        _tx(amount: 300, date: DateTime(2026, 3, 2), category: 'Electronics'),
+        _tx(amount: 50, date: DateTime(2026, 3, 3)),
+        // Previous month (February), same day-count window: Food leads.
+        _tx(amount: 200, date: DateTime(2026, 2, 2)),
+        _tx(amount: 30, date: DateTime(2026, 2, 3), category: 'Electronics'),
+      ];
+
+      final snapshot =
+          computeCurrentMonthSnapshot(transactions, DateTime(2026, 3, 10));
+
+      expect(snapshot, isNotNull);
+      expect(snapshot!.categoryChange, isNotNull);
+      expect(snapshot.categoryChange!.previous, 'Food');
+      expect(snapshot.categoryChange!.current, 'Electronics');
+    });
+
+    test('is null when the leading category is unchanged', () {
+      final transactions = [
+        _tx(amount: 300, date: DateTime(2026, 3, 2), category: 'Electronics'),
+        _tx(amount: 200, date: DateTime(2026, 2, 2), category: 'Electronics'),
+      ];
+
+      final snapshot =
+          computeCurrentMonthSnapshot(transactions, DateTime(2026, 3, 10));
+
+      expect(snapshot, isNotNull);
+      expect(snapshot!.categoryChange, isNull);
+    });
+
+    test('is null when the previous period has no spending data', () {
+      final transactions = [
+        _tx(amount: 300, date: DateTime(2026, 3, 2), category: 'Electronics'),
+      ];
+
+      final snapshot =
+          computeCurrentMonthSnapshot(transactions, DateTime(2026, 3, 10));
+
+      expect(snapshot, isNotNull);
+      expect(snapshot!.categoryChange, isNull);
+    });
+  });
 }

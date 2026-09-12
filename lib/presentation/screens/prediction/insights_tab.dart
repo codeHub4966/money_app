@@ -2,6 +2,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/utils/category_change.dart';
 import '../../../core/utils/spending_anomaly.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../domain/models/transaction.dart' as tx;
@@ -1259,6 +1260,27 @@ class _MonthData {
         text:
             '${topCategory.label} is your highest spending category this month, at ${topCategory.pct.round()}% of total expenses.',
         rule: '${rm(topCategory.value)} OF ${rm(spent)}',
+      ));
+    }
+    // Leading category vs the same period last month, shared with the
+    // notification detector so both surfaces agree.
+    final prevMonthTx = all
+        .where((t) => isAnomalyEligibleExpense(
+            t, prevMonthStart.year, prevMonthStart.month))
+        .toList();
+    final categoryChange = detectCategoryChange(
+      currentMonthTx: monthTx,
+      previousMonthTx: prevMonthTx,
+      daysElapsed: daysElapsed,
+    );
+    if (categoryChange != null) {
+      insights.add(_Insight(
+        icon: Icons.compare_arrows_rounded,
+        alert: false,
+        text:
+            'Your leading spending category changed from ${categoryChange.previous} to ${categoryChange.current}.',
+        rule:
+            '${kMonthNames[prevMonthStart.month - 1].toUpperCase()} VS ${kMonthNames[month.month - 1].toUpperCase()}',
       ));
     }
     if (spikes.isNotEmpty) {

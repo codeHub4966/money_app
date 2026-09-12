@@ -10,6 +10,12 @@ import '../../domain/models/wallet.dart' as wl;
 import '../../domain/models/budget.dart' as bg;
 import '../../domain/models/app_category.dart';
 
+/// Whether the app is currently past its PIN/biometric lock screen. Kept in
+/// sync with `_MoneyAppState`'s lock/unlock lifecycle in main.dart. Consumers
+/// (e.g. the insight-notification watcher) read this to avoid acting on
+/// transaction data while the app is locked.
+final isAppUnlockedProvider = StateProvider<bool>((ref) => false);
+
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
   final db = AppDatabase();
   ref.onDispose(db.close);
@@ -48,7 +54,11 @@ final budgetsProvider = StreamProvider<List<bg.Budget>>((ref) {
               t.date.year == now.year &&
               t.date.month == now.month)
           .fold(0.0, (s, t) => s + t.amount);
-      return bg.Budget(id: b.id, categoryName: b.categoryName, monthlyLimit: b.monthlyLimit, spent: spent);
+      return bg.Budget(
+          id: b.id,
+          categoryName: b.categoryName,
+          monthlyLimit: b.monthlyLimit,
+          spent: spent);
     }).toList();
   });
 });
@@ -59,33 +69,33 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
   static const _prefsKey = 'app_categories_v1';
 
   static const _defaultExpense = [
-    AppCategory(id: 'food',       label: 'Food',       emoji: '🍲'),
-    AppCategory(id: 'goods',      label: 'Goods',      emoji: '🧻'),
-    AppCategory(id: 'snacks',     label: 'Snacks',     emoji: '🍩'),
-    AppCategory(id: 'fruit',      label: 'Fruit',      emoji: '🍉'),
-    AppCategory(id: 'vegetables', label: 'Vegetab.',   emoji: '🥬'),
-    AppCategory(id: 'games',      label: 'Games',      emoji: '🎮'),
-    AppCategory(id: 'clothing',   label: 'Clothing',   emoji: '👕'),
-    AppCategory(id: 'shopping',   label: 'Shopping',   emoji: '🛍️'),
-    AppCategory(id: 'transport',  label: 'Transport',  emoji: '🚗'),
-    AppCategory(id: 'movies',     label: 'Movies',     emoji: '🎬'),
-    AppCategory(id: 'health',     label: 'Health',     emoji: '💊'),
-    AppCategory(id: 'fitness',    label: 'Fitness',    emoji: '💪'),
-    AppCategory(id: 'gifts',      label: 'Gifts',      emoji: '🎁'),
-    AppCategory(id: 'study',      label: 'Study',      emoji: '📚'),
-    AppCategory(id: 'travel',     label: 'Travel',     emoji: '✈️'),
-    AppCategory(id: 'pets',       label: 'Pets',       emoji: '🐾'),
+    AppCategory(id: 'food', label: 'Food', emoji: '🍲'),
+    AppCategory(id: 'goods', label: 'Goods', emoji: '🧻'),
+    AppCategory(id: 'snacks', label: 'Snacks', emoji: '🍩'),
+    AppCategory(id: 'fruit', label: 'Fruit', emoji: '🍉'),
+    AppCategory(id: 'vegetables', label: 'Vegetab.', emoji: '🥬'),
+    AppCategory(id: 'games', label: 'Games', emoji: '🎮'),
+    AppCategory(id: 'clothing', label: 'Clothing', emoji: '👕'),
+    AppCategory(id: 'shopping', label: 'Shopping', emoji: '🛍️'),
+    AppCategory(id: 'transport', label: 'Transport', emoji: '🚗'),
+    AppCategory(id: 'movies', label: 'Movies', emoji: '🎬'),
+    AppCategory(id: 'health', label: 'Health', emoji: '💊'),
+    AppCategory(id: 'fitness', label: 'Fitness', emoji: '💪'),
+    AppCategory(id: 'gifts', label: 'Gifts', emoji: '🎁'),
+    AppCategory(id: 'study', label: 'Study', emoji: '📚'),
+    AppCategory(id: 'travel', label: 'Travel', emoji: '✈️'),
+    AppCategory(id: 'pets', label: 'Pets', emoji: '🐾'),
   ];
 
   static const _defaultIncome = [
-    AppCategory(id: 'salary',     label: 'Salary',     emoji: '💰'),
-    AppCategory(id: 'bonus',      label: 'Bonus',      emoji: '🏅'),
+    AppCategory(id: 'salary', label: 'Salary', emoji: '💰'),
+    AppCategory(id: 'bonus', label: 'Bonus', emoji: '🏅'),
     AppCategory(id: 'investment', label: 'Investment', emoji: '📈'),
-    AppCategory(id: 'gift',       label: 'Gift',       emoji: '🎁'),
-    AppCategory(id: 'freelance',  label: 'Freelance',  emoji: '💻'),
-    AppCategory(id: 'rental',     label: 'Rental',     emoji: '🏠'),
-    AppCategory(id: 'dividend',   label: 'Dividend',   emoji: '📊'),
-    AppCategory(id: 'other',      label: 'Other',      emoji: '📦'),
+    AppCategory(id: 'gift', label: 'Gift', emoji: '🎁'),
+    AppCategory(id: 'freelance', label: 'Freelance', emoji: '💻'),
+    AppCategory(id: 'rental', label: 'Rental', emoji: '🏠'),
+    AppCategory(id: 'dividend', label: 'Dividend', emoji: '📊'),
+    AppCategory(id: 'other', label: 'Other', emoji: '📦'),
   ];
 
   CategoryNotifier()
@@ -112,14 +122,19 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
 
   Future<void> _persist() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsKey, jsonEncode({
-      'expense': state['expense']!.map((c) => c.toJson()).toList(),
-      'income':  state['income']!.map((c) => c.toJson()).toList(),
-    }));
+    await prefs.setString(
+        _prefsKey,
+        jsonEncode({
+          'expense': state['expense']!.map((c) => c.toJson()).toList(),
+          'income': state['income']!.map((c) => c.toJson()).toList(),
+        }));
   }
 
   void add(String type, AppCategory cat) {
-    state = {...state, type: [...state[type]!, cat]};
+    state = {
+      ...state,
+      type: [...state[type]!, cat]
+    };
     _persist();
   }
 
@@ -130,11 +145,14 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
     final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
     final budgets = ref.read(budgetsProvider).valueOrNull ?? [];
 
-    final isUsedInTransactions = transactions.any((t) => t.category.toLowerCase() == id.toLowerCase());
-    final isUsedInBudgets = budgets.any((b) => b.categoryName.toLowerCase() == id.toLowerCase());
+    final isUsedInTransactions =
+        transactions.any((t) => t.category.toLowerCase() == id.toLowerCase());
+    final isUsedInBudgets =
+        budgets.any((b) => b.categoryName.toLowerCase() == id.toLowerCase());
 
     if (isUsedInTransactions || isUsedInBudgets) {
-      throw Exception('Cannot delete category: it is currently in use by transactions or budgets');
+      throw Exception(
+          'Cannot delete category: it is currently in use by transactions or budgets');
     }
 
     state = {...state, type: state[type]!.where((c) => c.id != id).toList()};
