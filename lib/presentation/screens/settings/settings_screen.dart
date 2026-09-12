@@ -8,6 +8,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../core/services/pin_service.dart';
 import '../../../core/services/export_service.dart';
 import '../../../core/services/backup_service.dart';
+import '../../../core/services/import_service.dart';
 import '../../../data/repositories/wallet_repository.dart';
 import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/app_category.dart';
@@ -15,6 +16,7 @@ import '../../../core/services/notification_service.dart';
 import '../settings/pin_screen.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart';
+import '../../../domain/models/wallet.dart';
 import '../../../data/repositories/transaction_repository.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -751,20 +753,47 @@ class _ImportSheet extends StatefulWidget {
 }
 
 class _ImportSheetState extends State<_ImportSheet> {
+  String _format = 'json';
   bool _loading = false;
   String? _message;
   bool _isError = false;
 
+  Future<String?> _resolveFallbackWallet(List<Wallet> wallets) {
+    return showDialog<String>(
+      context: context,
+      builder: (_) => _FallbackWalletDialog(wallets: wallets),
+    );
+  }
+
   Future<void> _run() async {
     setState(() { _loading = true; _message = null; _isError = false; });
     try {
-      final summary = await BackupService.importBackup(
-        txRepo: widget.txRepo,
-        walletRepo: widget.walletRepo,
-        budgetRepo: widget.budgetRepo,
-      );
-      widget.onImported();
-      setState(() { _message = '✅ Import successful!\n$summary'; _isError = false; });
+      if (_format == 'json') {
+        final summary = await BackupService.importBackup(
+          txRepo: widget.txRepo,
+          walletRepo: widget.walletRepo,
+          budgetRepo: widget.budgetRepo,
+        );
+        widget.onImported();
+        setState(() { _message = '✅ Import successful!\n$summary'; _isError = false; });
+      } else {
+        final summary = _format == 'csv'
+            ? await ImportService.importCsv(
+                txRepo: widget.txRepo,
+                walletRepo: widget.walletRepo,
+                resolveFallbackWallet: _resolveFallbackWallet,
+              )
+            : await ImportService.importPdf(
+                txRepo: widget.txRepo,
+                walletRepo: widget.walletRepo,
+                resolveFallbackWallet: _resolveFallbackWallet,
+              );
+        // A null summary means the user cancelled the file picker - leave the
+        // sheet as-is without showing an error.
+        if (summary != null) {
+          setState(() { _message = '✅ Import complete!\n$summary'; _isError = false; });
+        }
+      }
     } catch (e) {
       setState(() { _message = '❌ $e'; _isError = true; });
     } finally {
@@ -782,25 +811,25 @@ class _ImportSheetState extends State<_ImportSheet> {
           decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(3)))),
         const SizedBox(height: 16),
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          const Text('Import Backup', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+          const Text('Import Data', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
           GestureDetector(onTap: () => Navigator.pop(context),
             child: Container(width: 36, height: 36, decoration: BoxDecoration(
                 color: AppTheme.surfaceContainerLow, shape: BoxShape.circle),
               child: const Icon(Icons.close_rounded, size: 18))),
         ]),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: AppTheme.surfaceContainerLow, borderRadius: BorderRadius.circular(16)),
-          child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Icon(Icons.info_outline_rounded, color: AppTheme.secondary, size: 20),
-            SizedBox(width: 10),
-            Expanded(child: Text(
-              'Select a .json backup file exported from this app. All wallets, budgets, categories, and transactions will be merged into your current data.',
-              style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant, height: 1.45),
-            )),
-          ]),
-        ),
+        const SizedBox(height: 20),
+        _FormatCard(
+          id: 'json', icon: Icons.backup_rounded, iconBg: AppTheme.secondary,
+          title: 'Full Backup (JSON)', sub: 'Restores wallets, budgets, categories & settings from a file exported by this app.',
+          selected: _format == 'json', onTap: () => setState(() { _format = 'json'; _message = null; })),
+        const SizedBox(height: 10),
+        _FormatCard(id: 'csv', icon: Icons.table_chart_rounded, iconBg: AppTheme.primary,
+          title: 'CSV – Transactions', sub: 'Import transactions from a .csv file exported by this app.',
+          selected: _format == 'csv', onTap: () => setState(() { _format = 'csv'; _message = null; })),
+        const SizedBox(height: 10),
+        _FormatCard(id: 'pdf', icon: Icons.picture_as_pdf_rounded, iconBg: const Color(0xFFEF4444),
+          title: 'PDF – Transactions', sub: 'Import transactions from a .pdf file exported by this app.',
+          selected: _format == 'pdf', onTap: () => setState(() { _format = 'pdf'; _message = null; })),
         if (_message != null) ...[const SizedBox(height: 14),
           _ResultBanner(message: _message!, isError: _isError)],
         const SizedBox(height: 20),
@@ -815,11 +844,56 @@ class _ImportSheetState extends State<_ImportSheet> {
               : const Row(mainAxisSize: MainAxisSize.min, children: [
                   Icon(Icons.upload_rounded, color: Colors.white, size: 20),
                   SizedBox(width: 8),
-                  Text('SELECT BACKUP FILE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                  Text('SELECT FILE', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, letterSpacing: 1.5)),
                 ])),
           ),
         ),
       ]),
+    );
+  }
+}
+
+class _FallbackWalletDialog extends StatelessWidget {
+  final List<Wallet> wallets;
+  const _FallbackWalletDialog({required this.wallets});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Wallet not found'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: wallets.isEmpty
+            ? const Text('Some transactions reference a wallet that no longer exists, and there are no wallets to fall back to. Those rows will be skipped.')
+            : Column(mainAxisSize: MainAxisSize.min, children: [
+                const Text(
+                  'Some transactions reference a wallet that no longer exists on this device. Choose an existing wallet to assign them to:',
+                  style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: wallets.length,
+                    itemBuilder: (_, i) {
+                      final w = wallets[i];
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.account_balance_wallet_rounded, color: AppTheme.primary),
+                        title: Text(w.name),
+                        onTap: () => Navigator.pop(context, w.id),
+                      );
+                    },
+                  ),
+                ),
+              ]),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Skip those rows'),
+        ),
+      ],
     );
   }
 }
