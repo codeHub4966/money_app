@@ -61,6 +61,22 @@ void main() {
     });
 
     test(
+        'the multiplier in the body text is computed from the RM0-excluded avgDay',
+        () {
+      // avgDay here is assumed already computed as spent/non-zero-days (as
+      // computeCurrentMonthSnapshot does) — this only checks that the
+      // multiplier passes that value through untouched rather than
+      // re-deriving it from elapsed calendar days.
+      final result = computeNewSpikesToSchedule(
+        snapshot: _snapshot(avgDay: 80, spikes: [spike]),
+        alreadyScheduled: const {},
+        now: now,
+      );
+
+      expect(result.notifications.single.body, contains('2.5x your average'));
+    });
+
+    test(
         'duplicate prevention: an already-scheduled spike is not scheduled again',
         () {
       final result = computeNewSpikesToSchedule(
@@ -79,14 +95,14 @@ void main() {
       () {
     final now = DateTime(2026, 3, 10, 21, 30);
 
-    test('schedules for 12:00 local time on the following day', () {
+    test('schedules for 11:00 local time on the following day', () {
       final update = computeNextDaySummaryUpdate(
         snapshot: _snapshot(forecastProjected: 1200),
         now: now,
       );
 
       expect(update, isNotNull);
-      expect(update!.scheduledDate, DateTime(2026, 3, 11, 12, 0));
+      expect(update!.scheduledDate, DateTime(2026, 3, 11, 11, 0));
     });
 
     test('includes one line per available result, in order', () {

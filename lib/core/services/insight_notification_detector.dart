@@ -59,7 +59,10 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
   final spent = recorded.fold(0.0, (s, v) => s + v);
   if (spent <= 0) return null;
 
-  final avgDay = spent / daysElapsed;
+  // Average is spend ÷ non-zero spending days so RM0 calendar days never
+  // drag it down (and, in turn, never inflate the "x your average" figure).
+  final nonZeroDays = recorded.where((v) => v > 0).length;
+  final avgDay = nonZeroDays > 0 ? spent / nonZeroDays : 0.0;
 
   // Unusual spending days: IQR rule shared with the Insights tab.
   final spikes = detectUnusualSpendingDays(

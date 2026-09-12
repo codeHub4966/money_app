@@ -102,6 +102,63 @@ void main() {
     expect(snapshot!.spikes, isEmpty);
   });
 
+  group('avgDay (RM0 exclusion)', () {
+    test('RM0 calendar days do not affect avgDay or the spike multiplier', () {
+      // Spending only on days 1, 3, 5, 7, 9 — days 2, 4, 6, 8, 10 are RM0.
+      final transactions = [
+        _tx(amount: 10, date: DateTime(2026, 3, 1)),
+        _tx(amount: 20, date: DateTime(2026, 3, 3)),
+        _tx(amount: 30, date: DateTime(2026, 3, 5)),
+        _tx(amount: 40, date: DateTime(2026, 3, 7)),
+        _tx(amount: 300, date: DateTime(2026, 3, 9), category: 'Electronics'),
+      ];
+
+      final snapshot =
+          computeCurrentMonthSnapshot(transactions, DateTime(2026, 3, 10));
+
+      expect(snapshot, isNotNull);
+      // 5 non-zero spending days (1,3,5,7,9), NOT the 10 elapsed calendar
+      // days — a naive spent/daysElapsed would give 400/10 = 40.
+      expect(snapshot!.avgDay, 400 / 5);
+      expect(snapshot.avgDay, 80);
+    });
+
+    test('matches the same spent/non-zero-days formula insights_tab.dart uses',
+        () {
+      final transactions = [
+        _tx(amount: 10, date: DateTime(2026, 3, 1)),
+        _tx(amount: 500, date: DateTime(2026, 3, 4)),
+        _tx(amount: 20, date: DateTime(2026, 3, 6)),
+        _tx(amount: 30, date: DateTime(2026, 3, 8)),
+        _tx(amount: 40, date: DateTime(2026, 3, 10)),
+      ];
+      final now = DateTime(2026, 3, 10);
+
+      final snapshot = computeCurrentMonthSnapshot(transactions, now);
+
+      // Replicates insights_tab.dart's _MonthData.compute avgDay formula:
+      // spent / count of non-zero days within the elapsed window, using the
+      // same isAnomalyEligibleExpense filter and day-bucketing.
+      final month = DateTime(now.year, now.month, 1);
+      final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
+      final daysElapsed = now.day.clamp(1, daysInMonth);
+      final monthTx = transactions
+          .where((t) => isAnomalyEligibleExpense(t, month.year, month.month))
+          .toList();
+      final dailyFull = List<double>.filled(daysInMonth, 0);
+      for (final t in monthTx) {
+        dailyFull[t.date.day - 1] += t.amount;
+      }
+      final recorded = dailyFull.sublist(0, daysElapsed);
+      final spent = recorded.fold(0.0, (s, v) => s + v);
+      final nonZeroDays = recorded.where((v) => v > 0).length;
+      final expectedAvgDay = spent / nonZeroDays;
+
+      expect(snapshot, isNotNull);
+      expect(snapshot!.avgDay, expectedAvgDay);
+    });
+  });
+
   group('categoryChange', () {
     test('flags a leading-category change vs the same period last month', () {
       final transactions = [

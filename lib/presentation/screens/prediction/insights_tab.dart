@@ -87,14 +87,14 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
       children: [
-        if (data.isCurrentMonth) ...[
+        if (data.forecast != null) ...[
           _buildForecastCard(data),
           const SizedBox(height: 12),
         ],
         _buildTrendCard(data, bars, sel, selIdx, maxV, avgForView),
         const SizedBox(height: 12),
         _buildStatGrid(data, allCats),
-        if (data.momMonths.length >= 2) ...[
+        if (data.momPct != null) ...[
           const SizedBox(height: 12),
           _buildMomCard(data),
         ],
@@ -1125,7 +1125,10 @@ class _MonthData {
           smartInsights: const []);
     }
 
-    final avgDay = spent / daysElapsed;
+    // Average is spend ÷ non-zero spending days so RM0 calendar days never
+    // drag it down (and, in turn, never inflate the "x your average" figure).
+    final nonZeroDays = recorded.where((v) => v > 0).length;
+    final avgDay = nonZeroDays > 0 ? spent / nonZeroDays : 0.0;
 
     var hiDay = 1;
     var hiV = 0.0;

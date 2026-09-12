@@ -63,6 +63,29 @@ final insightNotificationWatcherProvider = Provider<void>((ref) {
   }, fireImmediately: true);
 });
 
+/// Clears all persisted insight-notification state (unusual-spending
+/// signatures, next-day summary target/content) and cancels any
+/// notifications already scheduled under it. Call this when the underlying
+/// transaction data has been wiped (e.g. Settings' "Delete All Data") so
+/// stale schedules referencing deleted transactions don't fire.
+Future<void> clearInsightNotificationState() async {
+  final prefs = await SharedPreferences.getInstance();
+  final notifications = NotificationService();
+
+  await notifications.cancelInsightNotification(kNextDaySummaryNotificationId);
+  await prefs.remove(_kNextDaySummaryTargetKey);
+  await prefs.remove(_kNextDaySummarySigKey);
+
+  final spikeKeys =
+      prefs.getKeys().where((k) => k.startsWith('notified_spikes_')).toList();
+  for (final key in spikeKeys) {
+    for (final sig in prefs.getStringList(key) ?? const <String>[]) {
+      await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
+    }
+    await prefs.remove(key);
+  }
+}
+
 Future<void> _checkForNewInsights(List<tx.Transaction> transactions) async {
   final snapshot = computeCurrentMonthSnapshot(transactions, DateTime.now());
   if (snapshot == null) return;
@@ -172,7 +195,7 @@ Future<void> _scheduleNewSpikes(
 /// needs to change (no results are available yet, or the pending
 /// notification already matches this content).
 class NextDaySummaryUpdate {
-  final DateTime scheduledDate; // always 12:00 the day after `now`.
+  final DateTime scheduledDate; // always 11:00 the day after `now`.
   final List<String> lines;
   final String targetSignature;
   final String contentSignature;
@@ -188,7 +211,7 @@ class NextDaySummaryUpdate {
 ///
 /// Builds one line per available result (projected month-end spending,
 /// spending pace, leading-category change — in that order, only the ones
-/// that are non-null), targets delivery for 12:00 local time on the day
+/// that are non-null), targets delivery for 11:00 local time on the day
 /// after [now], and compares against [storedTargetSignature]/
 /// [storedContentSignature] (whatever was persisted for the last scheduled
 /// summary) to decide whether anything needs to change. Returns `null` when
@@ -217,7 +240,7 @@ NextDaySummaryUpdate? computeNextDaySummaryUpdate({
   }
   if (lines.isEmpty) return null;
 
-  final target = DateTime(now.year, now.month, now.day + 1, 12, 0);
+  final target = DateTime(now.year, now.month, now.day + 1, 11, 0);
   final targetSignature = target.toIso8601String().substring(0, 10);
   final contentSignature = lines.join('');
   if (storedTargetSignature == targetSignature &&
@@ -235,8 +258,8 @@ NextDaySummaryUpdate? computeNextDaySummaryUpdate({
 
 // Combines whichever of {forecast, pace, leading-category change} are
 // currently available into a single expandable notification, scheduled for
-// noon the next day rather than sent immediately. If the content that would
-// be shown changes before that delivery time, the pending notification is
+// 11:00 AM the next day rather than sent immediately. If the content that
+// would be shown changes before that delivery time, the pending notification is
 // replaced in place (same fixed id) rather than stacking a second one.
 Future<void> _scheduleNextDaySummary(
   NotificationService notifications,

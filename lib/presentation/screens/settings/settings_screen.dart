@@ -13,11 +13,16 @@ import '../../../data/repositories/wallet_repository.dart';
 import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../core/services/notification_service.dart';
+import '../../providers/insight_notification_provider.dart';
 import '../settings/pin_screen.dart';
 import '../../providers/app_providers.dart';
 import '../../../domain/models/transaction.dart';
 import '../../../domain/models/wallet.dart';
 import '../../../data/repositories/transaction_repository.dart';
+
+// Default time offered when a user enables the Daily Expense Reminder for
+// the first time (before they've ever picked a time of their own).
+const kDefaultDailyReminderTime = TimeOfDay(hour: 20, minute: 0);
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -125,7 +130,7 @@ class _State extends ConsumerState<SettingsScreen> {
 
     final time = await showTimePicker(
       context: context,
-      initialTime: _reminderTime ?? const TimeOfDay(hour: 20, minute: 0),
+      initialTime: _reminderTime ?? kDefaultDailyReminderTime,
     );
 
     if (time != null) {
@@ -581,8 +586,24 @@ class _State extends ConsumerState<SettingsScreen> {
     );
 
     if (confirm == true) {
+      final receiptPaths = (ref.read(transactionsProvider).valueOrNull ?? [])
+          .map((t) => t.receiptImagePath)
+          .whereType<String>()
+          .toList();
+
       final db = ref.read(appDatabaseProvider);
       await db.deleteAllData();
+
+      for (final path in receiptPaths) {
+        try {
+          final file = File(path);
+          if (await file.exists()) await file.delete();
+        } catch (_) {}
+      }
+
+      ref.read(walletOrderProvider.notifier).saveOrder([]);
+      await clearInsightNotificationState();
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('All data deleted successfully.')),
