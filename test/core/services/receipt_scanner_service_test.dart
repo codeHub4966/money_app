@@ -282,6 +282,268 @@ MAYBANK VISA
     });
   });
 
+  group('suggestCategory — expanded Malaysian merchant/item keywords', () {
+    test('Jaya Grocer + Milk + Eggs -> Groceries', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Jaya Grocer',
+        itemDescriptions: ['Milk', 'Eggs'],
+        existingCategoryLabels: ['Groceries', 'Food'],
+      );
+      expect(category, 'Groceries');
+    });
+
+    test('99 Speed Mart + Maggi -> Groceries', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: '99 Speed Mart',
+        itemDescriptions: ['Maggi'],
+        existingCategoryLabels: ['Groceries', 'Food'],
+      );
+      expect(category, 'Groceries');
+    });
+
+    test('AEON + Rice -> Groceries (rice also appears in Food, Groceries still wins)', () {
+      final (category, confidence) = ReceiptScannerService.suggestCategory(
+        merchantName: 'AEON',
+        itemDescriptions: ['Rice'],
+        existingCategoryLabels: ['Groceries', 'Food'],
+      );
+      expect(category, 'Groceries');
+      expect(confidence, FieldConfidence.high);
+    });
+
+    test("McDonald's + Fries -> Food", () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: "McDonald's",
+        itemDescriptions: ['Fries'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('KFC + Chicken -> Food', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'KFC',
+        itemDescriptions: ['Chicken'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('Tealive + Tea -> Food', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Tealive',
+        itemDescriptions: ['Tea'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('Mixue + Ice -> Food (Ice is weak but merchant evidence carries it)', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Mixue',
+        itemDescriptions: ['Ice'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('ZUS + Coffee -> Food', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'ZUS',
+        itemDescriptions: ['Coffee'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('Shusi (typo) -> Food, treated as Sushi', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['Shusi'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('Coffe (typo) -> Food, treated as Coffee', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['Coffe'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+
+    test('Guardian + Bodywash -> Health', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Guardian',
+        itemDescriptions: ['Bodywash'],
+        existingCategoryLabels: ['Health', 'Food'],
+      );
+      expect(category, 'Health');
+    });
+
+    test('Watsons + Skin -> Health', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Watsons',
+        itemDescriptions: ['Skin'],
+        existingCategoryLabels: ['Health', 'Food'],
+      );
+      expect(category, 'Health');
+    });
+
+    test('H&M + Socks -> Clothing', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'H&M',
+        itemDescriptions: ['Socks'],
+        existingCategoryLabels: ['Clothing', 'Groceries'],
+      );
+      expect(category, 'Clothing');
+    });
+
+    test('Cotton On + T-Shirt -> Clothing', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Cotton On',
+        itemDescriptions: ['T-Shirt'],
+        existingCategoryLabels: ['Clothing', 'Groceries'],
+      );
+      expect(category, 'Clothing');
+    });
+
+    test('Padini + TEE -> Clothing (TEE is weak but merchant evidence carries it)', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Padini',
+        itemDescriptions: ['TEE'],
+        existingCategoryLabels: ['Clothing', 'Food'],
+      );
+      expect(category, 'Clothing');
+    });
+
+    test('MR DIY -> Shopping (also tolerates "MR D.I.Y" / "MR.DIY" / "MRDIY")', () {
+      for (final variant in ['MR DIY', 'MR D.I.Y', 'MR.DIY', 'MRDIY']) {
+        final (category, _) = ReceiptScannerService.suggestCategory(
+          merchantName: variant,
+          existingCategoryLabels: ['Shopping', 'Food'],
+        );
+        expect(category, 'Shopping', reason: 'variant: $variant');
+      }
+    });
+
+    test('PETRONAS -> Transport', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'PETRONAS',
+        existingCategoryLabels: ['Transport', 'Food'],
+      );
+      expect(category, 'Transport');
+    });
+
+    test('Shell -> Transport', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Shell',
+        existingCategoryLabels: ['Transport', 'Food'],
+      );
+      expect(category, 'Transport');
+    });
+
+    test('BHP -> Transport', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'BHP',
+        existingCategoryLabels: ['Transport', 'Food'],
+      );
+      expect(category, 'Transport');
+    });
+
+    test('AEON + Socks -> Clothing beats AEON\'s own grocery merchant tendency', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'AEON',
+        itemDescriptions: ['Socks'],
+        existingCategoryLabels: ['Clothing', 'Groceries'],
+      );
+      expect(category, 'Clothing');
+    });
+
+    test('FamilyMart + Ramen -> Food', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'FamilyMart',
+        itemDescriptions: ['Ramen'],
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, 'Food');
+    });
+  });
+
+  group('suggestCategory — weak/generic words never buy high confidence alone', () {
+    test('FACE alone is not a HIGH-confidence category', () {
+      final (_, confidence) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['FACE'],
+        existingCategoryLabels: ['Health', 'Food'],
+      );
+      expect(confidence, isNot(FieldConfidence.high));
+    });
+
+    test('Cold alone is not a HIGH-confidence category', () {
+      final (_, confidence) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['Cold'],
+        existingCategoryLabels: ['Food', 'Health'],
+      );
+      expect(confidence, isNot(FieldConfidence.high));
+    });
+
+    test('Water alone is not a HIGH-confidence category', () {
+      final (_, confidence) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['Water'],
+        existingCategoryLabels: ['Food', 'Health'],
+      );
+      expect(confidence, isNot(FieldConfidence.high));
+    });
+  });
+
+  group('suggestCategory — payment/footer terms never contribute to category scoring', () {
+    test('"QR Payment" alone yields no category (it is a payment clue, not category evidence)', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        rawText: 'QR Payment',
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, isNull);
+    });
+
+    test('"E-wallet" alone yields no category (it is a payment clue, not category evidence)', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        rawText: 'E-wallet',
+        existingCategoryLabels: ['Food', 'Groceries'],
+      );
+      expect(category, isNull);
+    });
+
+    test('VISA/MASTERCARD/DEBIT/CREDIT/CASH/CHANGE/TOTAL never sway category scoring', () {
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Restoran ABC',
+        itemDescriptions: ['Nasi Lemak'],
+        rawText: 'VISA MASTERCARD DEBIT CREDIT QR DUITNOW E-WALLET PAYMENT CASH CHANGE TOTAL',
+        existingCategoryLabels: ['Food', 'Transport'],
+      );
+      expect(category, 'Food');
+    });
+  });
+
+  group('parseReceiptText — detectedPaymentKeyword recognizes generic e-wallet/QR clues', () {
+    test('detects a generic e-wallet clue when no specific brand is present', () {
+      final data = ReceiptScannerService.parseReceiptText('''
+STORE ABC
+TOTAL 10.00
+PAID VIA E-WALLET
+''');
+      expect(data.detectedPaymentKeyword, 'e-wallet');
+    });
+
+    test('detects a generic QR payment clue when no specific brand is present', () {
+      final data = ReceiptScannerService.parseReceiptText('''
+STORE ABC
+TOTAL 10.00
+DUITNOW QR
+''');
+      expect(data.detectedPaymentKeyword, 'qr');
+    });
+  });
+
   group('suggestCategory — reliable merchant-history override', () {
     test('returns the reliable merchant-history category at high confidence, bypassing scoring', () {
       final (category, confidence) = ReceiptScannerService.suggestCategory(

@@ -45,19 +45,28 @@ class ReceiptScannerService {
   static final Map<String, List<String>> _categoryKeywords = {
     'Food & Dining': [
       // Merchants
-      'restaurant', 'cafe', 'coffee', 'starbucks', 'mcdonald', 'kfc', 'pizza',
-      'burger', 'kitchen', 'bakery', 'dining', 'bistro', 'bar', 'pub',
-      'nasi', 'makan', 'restoran', 'kedai', 'warung', 'mamak', 'subway',
-      'domino', 'pizza hut', 'tealive', 'chatime', 'oldtown', 'kopitiam',
+      'restaurant', 'restaurants', 'cafe', 'coffee', 'starbucks', 'mcdonald',
+      'mcdonalds', 'kfc', 'pizza', 'burger', 'kitchen', 'bakery', 'dining',
+      'bistro', 'bar', 'pub', 'nasi', 'makan', 'restoran', 'kedai', 'warung',
+      'mamak', 'subway', 'domino', 'pizza hut', 'tealive', 'chatime',
+      'oldtown', 'kopitiam', 'familymart', 'mixue', 'zus', 'zus coffee',
       // Food items
-      'rice', 'noodle', 'chicken', 'beef', 'fish', 'soup', 'curry', 'bread',
-      'sandwich', 'meal', 'breakfast', 'lunch', 'dinner', 'drink', 'beverage',
-      'coffee', 'tea', 'juice', 'water', 'roti', 'nasi lemak', 'mee', 'laksa',
+      'rice', 'noodle', 'chicken', 'beef', 'fish', 'duck', 'pork', 'seafood',
+      'soup', 'curry', 'bread', 'sandwich', 'meal', 'breakfast', 'lunch',
+      'dinner', 'drink', 'beverage', 'coffee', 'tea', 'juice', 'water',
+      'roti', 'nasi lemak', 'mee', 'laksa', 'sushi', 'ramen', 'carbonara',
+      'cake', 'soda', 'spicy', 'fries',
+      // Weak/generic — low weight, must not dominate on their own (see
+      // _weakKeywords).
+      'tee', 'ice', 'warm', 'cold',
     ],
     'Groceries': [
       'supermarket', 'market', 'grocery', 'tesco', 'giant', 'aeon', 'jaya',
-      'mart', 'store', 'speedmart', '99speedmart', 'mydin', 'lotus', 'econsave',
+      'jaya grocer', 'mart', 'store', 'speedmart', '99speedmart',
+      '99 speed mart', 'mydin', 'lotus', 'econsave', 'kk supermart',
+      'kk mart',
       'vegetables', 'fruits', 'milk', 'eggs', 'bread', 'meat', 'seafood',
+      'rice', 'mamee', 'maggi', 'biscuit',
     ],
     // Kept as its own bucket (rather than folded into "Shopping") because
     // most user category sets have a dedicated "Clothing" label, and
@@ -65,27 +74,34 @@ class ReceiptScannerService {
     // a merged "Shopping" bucket would always win that exact match and
     // fashion items would never resolve to "Clothing".
     'Clothing': [
-      'uniqlo', 'zara', 'h&m', 'nike', 'adidas', 'fashion', 'clothing',
-      'apparel', 'shoes', 'bag', 'shirt', 'tee', 't-shirt', 'pants', 'pant',
-      'jeans', 'dress', 'skirt', 'jacket', 'sweater', 'hoodie', 'sneakers',
-      'sandals', 'watch', 'accessories', 'hat', 'cap', 'socks', 'underwear',
-      'belt', 'boutique',
+      'uniqlo', 'zara', 'h&m', 'h & m', 'nike', 'adidas', 'fashion',
+      'clothing', 'apparel', 'shoes', 'bag', 'shirt', 't-shirt', 't shirt',
+      'pants', 'pant', 'jeans', 'dress', 'skirt', 'jacket', 'sweater',
+      'hoodie', 'sneakers', 'sandals', 'watch', 'accessories', 'hat', 'cap',
+      'socks', 'underwear', 'belt', 'boutique', 'padini', 'cotton on',
+      // Weak/generic — see _weakKeywords: ambiguous with the Food "tea/TEE"
+      // sense, so it must never win on its own.
+      'tee',
     ],
     'Shopping': [
-      'mall', 'shop', 'store',
+      'mall', 'shop', 'store', 'mr diy',
       // Electronics & others
       'electronic', 'phone', 'laptop', 'gadget', 'computer', 'tablet',
       'headphone', 'speaker', 'camera', 'toy', 'book', 'stationery',
     ],
     'Transportation': [
       'grab', 'uber', 'taxi', 'parking', 'petrol', 'shell', 'petronas',
-      'fuel', 'car wash', 'bus', 'train', 'lrt', 'mrt', 'toll', 'touch n go',
-      'caltex', 'bnp', 'diesel', 'ron95', 'ron97', 'tng', 'smarttag',
+      'petron', 'bhp', 'bhpetrol', 'fuel', 'car wash', 'bus', 'train', 'lrt',
+      'mrt', 'toll', 'touch n go', 'caltex', 'bnp', 'diesel', 'ron95',
+      'ron97', 'tng', 'smarttag',
     ],
     'Healthcare': [
       'clinic', 'hospital', 'pharmacy', 'guardian', 'watsons', 'medical',
       'doctor', 'dental', 'health', 'medicine', 'vitamin', 'supplement',
-      'mask', 'sanitizer', 'bandage', 'clinic',
+      'mask', 'sanitizer', 'bandage', 'clinic', 'bodywash', 'body wash',
+      'skin',
+      // Weak/generic — see _weakKeywords.
+      'face',
     ],
     'Entertainment': [
       'cinema', 'movie', 'gsc', 'tgv', 'concert', 'ticket', 'game',
@@ -122,6 +138,13 @@ class ReceiptScannerService {
     'mastercard': ['mastercard', 'master card'],
     'debit': ['debit'],
     'credit': ['credit'],
+    // Most generic payment clues last — only fire when nothing more specific
+    // matched above.
+    'e-wallet': ['e-wallet', 'ewallet', 'e wallet'],
+    // 'duitnow' on its own is a generic QR-rail clue, not a specific wallet
+    // brand — it must resolve here (the generic tier), never to a specific
+    // e-wallet like Touch 'n Go just because TNG also supports DuitNow QR.
+    'qr': ['duitnow qr', 'qr payment', 'qr pay', 'qr', 'duitnow'],
   };
 
   // Generic receipt headers/stamps that are never the merchant name —
@@ -147,7 +170,8 @@ class ReceiptScannerService {
     r'balance\s*due|amount\s*payable|amount\s*due|final\s*total|total|'
     r'service\s*charge|rounding|discount|cash|change|tendered|received|'
     r'visa|mastercard|debit|credit|receipt\s*no|invoice\s*no|order\s*no|'
-    r'transaction\s*id|cashier|counter|thank\s*you)\b',
+    r'transaction\s*id|cashier|counter|thank\s*you|payment|qr|duitnow|'
+    r'e-?wallet)\b',
     caseSensitive: false,
   );
 
@@ -242,13 +266,17 @@ class ReceiptScannerService {
   static final RegExp _discountKw =
       RegExp(r'\b(discount|rounding|service\s*charge)\b', caseSensitive: false);
   static final RegExp _taxOnlyKw = RegExp(r'\b(gst|sst|vat|tax)\b', caseSensitive: false);
+  static final RegExp _serviceChargeOnlyKw = RegExp(r'\bservice\s*charge\b', caseSensitive: false);
 
   /// Scores every line that carries (or, for a label with no inline price,
-  /// borrows from the next line) a monetary value, instead of returning
+  /// borrows from a nearby line) a monetary value, instead of returning
   /// whichever "total"-like keyword happens to appear first. This is what
   /// lets the parser distinguish the final payable amount from a subtotal,
   /// a tax line, cash tendered, change, or an unrelated number, even when
-  /// several of them appear on the receipt.
+  /// several of them appear on the receipt — and even when OCR row-grouping
+  /// merges the wrong nearby number onto the TOTAL row itself (e.g. "TOTAL
+  /// 5.44" on one row, with the genuine total "105.10" printed on the very
+  /// next line).
   static (double?, FieldConfidence) _extractAmount(List<String> lines) {
     final candidates = <({double value, int score, int lineIndex})>[];
 
@@ -266,54 +294,127 @@ class ReceiptScannerService {
       return score;
     }
 
+    // Receipt "components" — subtotal, tax, service charge, discount —
+    // collected independently of the candidate scan below so a total
+    // candidate can be cross-checked against them: a genuine grand total is
+    // roughly subtotal + tax + service charge, while a number that merely
+    // repeats one of those component amounts (e.g. an OCR row-grouping
+    // mistake that merged a tax value onto the TOTAL row) is not the total,
+    // no matter which line it landed on. Lines that are themselves a
+    // total/grand-total line are skipped here — "TOTAL (INCL. SST)"
+    // mentions SST but is not a component line.
+    double? subtotalValue;
+    final taxValues = <double>[];
+    final serviceChargeValues = <double>[];
+    final discountRoundingValues = <double>[];
+    for (final line in lines) {
+      final price = _extractFirstPrice(line);
+      if (price == null) continue;
+      if (_grandTotalKw.hasMatch(line) || _bareTotalKw.hasMatch(line)) continue;
+      if (_subtotalKw.hasMatch(line)) {
+        subtotalValue = price;
+      } else if (_serviceChargeOnlyKw.hasMatch(line)) {
+        serviceChargeValues.add(price);
+      } else if (_taxOnlyKw.hasMatch(line)) {
+        taxValues.add(price);
+      } else if (_discountKw.hasMatch(line)) {
+        discountRoundingValues.add(price);
+      }
+    }
+    final hasComponents = subtotalValue != null;
+    final componentSum = (subtotalValue ?? 0) +
+        taxValues.fold<double>(0, (a, b) => a + b) +
+        serviceChargeValues.fold<double>(0, (a, b) => a + b);
+    final suspiciousComponentValues = <double>{
+      ...taxValues,
+      ...serviceChargeValues,
+      ...discountRoundingValues,
+    };
+
+    void addCandidate(double value, int score, int lineIndex) {
+      candidates.add((value: value, score: score, lineIndex: lineIndex));
+    }
+
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
       final inlinePrice = _extractFirstPrice(line);
+      final hasTotalLabel = _grandTotalKw.hasMatch(line) || _bareTotalKw.hasMatch(line);
 
       if (inlinePrice != null) {
-        candidates.add((value: inlinePrice, score: scoreLine(line), lineIndex: i));
-        continue;
+        addCandidate(inlinePrice, scoreLine(line), i);
       }
 
-      // A total-ish label with no inline price: the value is likely printed
-      // on the next line (a genuine multi-line layout, not an OCR-row
-      // splitting issue — that's handled upstream by row grouping). Only
-      // borrow forward when the next line isn't itself a different labelled
-      // amount (subtotal/cash/change/discount), and score it slightly lower
-      // since the association is indirect.
-      final hasTotalLabel = _grandTotalKw.hasMatch(line) || _bareTotalKw.hasMatch(line);
-      if (hasTotalLabel && i + 1 < lines.length) {
-        final nextLine = lines[i + 1];
-        final nextIsOtherLabel = _subtotalKw.hasMatch(nextLine) ||
-            _cashTenderedKw.hasMatch(nextLine) ||
-            _changeKw.hasMatch(nextLine) ||
-            _discountKw.hasMatch(nextLine);
-        final nextPrice = _extractFirstPrice(nextLine);
-        if (!nextIsOtherLabel && nextPrice != null) {
-          candidates.add((value: nextPrice, score: scoreLine(line) - 1, lineIndex: i + 1));
+      // A total-ish label's own inline number is never trusted in isolation
+      // — OCR row grouping can merge the wrong nearby number onto the TOTAL
+      // row. Nearby lines are always inspected as competing candidates, even
+      // when the TOTAL line already carries an inline price, rather than
+      // immediately accepting the first number found. Stops as soon as a
+      // differently-labelled line (subtotal/cash/change/discount/tax) is
+      // hit, rather than reading past it.
+      if (hasTotalLabel) {
+        for (var offset = 1; offset <= 2 && i + offset < lines.length; offset++) {
+          final nextLine = lines[i + offset];
+          final nextIsOtherLabel = _subtotalKw.hasMatch(nextLine) ||
+              _cashTenderedKw.hasMatch(nextLine) ||
+              _changeKw.hasMatch(nextLine) ||
+              _discountKw.hasMatch(nextLine) ||
+              _taxOnlyKw.hasMatch(nextLine);
+          if (nextIsOtherLabel) break;
+
+          final nextPrice = _extractFirstPrice(nextLine);
+          if (nextPrice == null) continue;
+
+          // When the TOTAL line already has its own inline price, the
+          // competing nearby candidate is scored the same, so the two are
+          // judged purely on corroborating evidence (receipt structure, or
+          // which one is later on the receipt) instead of always trusting
+          // the inline one. When TOTAL has no inline price at all, the
+          // borrowed value is scored a little lower since the label/value
+          // association is only indirect.
+          final borrowedScore =
+              inlinePrice != null ? scoreLine(line) - (offset - 1) : scoreLine(line) - offset;
+          addCandidate(nextPrice, borrowedScore, i + offset);
         }
       }
     }
 
     if (candidates.isEmpty) return (null, FieldConfidence.missing);
 
+    // Corroborate against receipt structure: a candidate that sums up
+    // subtotal + tax/service-charge lines is very likely the true payable
+    // total, while a candidate that merely repeats one of those component
+    // amounts verbatim is almost certainly a mis-attributed number — even if
+    // it landed directly on the TOTAL line.
+    const structureTolerance = 1.0; // absolute RM, covers receipt rounding
+    final scored = candidates.map((c) {
+      var score = c.score;
+      if (hasComponents && (c.value - componentSum).abs() <= structureTolerance) {
+        score += 6;
+      }
+      if (suspiciousComponentValues.any((v) => (v - c.value).abs() < 0.01)) {
+        score -= 7;
+      }
+      return (value: c.value, score: score, lineIndex: c.lineIndex);
+    }).toList();
+
     // Prefer the highest score; break ties by preferring the amount that
     // appears later in the receipt (the payable total is printed after the
     // items and subtotal it sums, and after tax lines it includes).
-    candidates.sort((a, b) {
+    scored.sort((a, b) {
       final byScore = b.score.compareTo(a.score);
       if (byScore != 0) return byScore;
       return b.lineIndex.compareTo(a.lineIndex);
     });
 
-    final best = candidates.first;
+    final best = scored.first;
 
     // Ambiguous when another candidate with a materially different value
     // scored nearly as well — e.g. two differently-labelled "total" lines
-    // that disagree. A keyword match alone should not buy high confidence
-    // when the receipt itself is contradictory; this is what lets the
-    // Gemini fallback be consulted for exactly this case.
-    final isAmbiguous = candidates.skip(1).any(
+    // that disagree, or a TOTAL-line number that conflicts with a
+    // structurally-supported one. A keyword match alone should not buy high
+    // confidence when the receipt itself is contradictory; this is what
+    // lets the Gemini fallback be consulted for exactly this case.
+    final isAmbiguous = scored.skip(1).any(
           (c) => c.score >= best.score - 2 && (c.value - best.value).abs() > 0.01,
         );
 
@@ -618,10 +719,52 @@ class ReceiptScannerService {
   static const int _merchantKeywordWeight = 3;
   static const int _rawTextKeywordWeight = 1;
 
+  // Generic/ambiguous words that ARE real evidence but must never carry full
+  // item/merchant weight on their own — e.g. "TEE" alone could mean a
+  // t-shirt or just be noise, and "Water"/"Ice"/"Cold"/"Warm"/"Face" are
+  // common words with only a loose category association. Applied regardless
+  // of which category bucket the keyword appears under, and regardless of
+  // whether it was found in an item description or the merchant name — a
+  // single weak keyword must stay below _minCategoryScore on its own.
+  static const int _weakKeywordWeight = 1;
+  static const Set<String> _weakKeywords = {'tee', 'water', 'ice', 'warm', 'cold', 'face'};
+
+  // Lightweight text normalization applied before keyword matching only
+  // (never to the merchant name / item descriptions actually stored), so
+  // common OCR typos and punctuation/spacing variants are treated the same
+  // as their canonical spelling without needing every variant duplicated
+  // across the keyword lists.
+  static final List<(RegExp, String)> _matchingNormalizationRules = [
+    (RegExp(r'\bshusi\b', caseSensitive: false), 'sushi'),
+    (RegExp(r'\bcoffe\b', caseSensitive: false), 'coffee'),
+    (RegExp(r'\bbiskut\b', caseSensitive: false), 'biscuit'),
+    (RegExp(r'\bmr\.?\s*d\.?i\.?y\b', caseSensitive: false), 'mr diy'),
+    (RegExp(r"\bmcdonald'?s\b", caseSensitive: false), 'mcdonalds'),
+    (RegExp(r'\bmcd\b', caseSensitive: false), 'mcdonalds'),
+    (RegExp(r'\b99\s*speed\s*mart\b', caseSensitive: false), '99 speed mart'),
+    (RegExp(r"\blotus'?s\b", caseSensitive: false), 'lotus'),
+    (RegExp(r'\be-?wallet\b', caseSensitive: false), 'e wallet'),
+    // OCR commonly misreads the letter "Q" in "QR" as the digit "0" —
+    // "0R", "Q0" — and prints "DuitNow" with inconsistent spacing. Scoped to
+    // standalone tokens so this never rewrites an unrelated digit/letter
+    // sequence elsewhere on the receipt (a lot/room number, an item code).
+    (RegExp(r'\b0r\b', caseSensitive: false), 'qr'),
+    (RegExp(r'\bq0\b', caseSensitive: false), 'qr'),
+    (RegExp(r'\bduit\s*now\b', caseSensitive: false), 'duitnow'),
+  ];
+
+  static String _normalizeForMatching(String text) {
+    var result = text;
+    for (final (pattern, replacement) in _matchingNormalizationRules) {
+      result = result.replaceAll(pattern, replacement);
+    }
+    return result;
+  }
+
   // Lines that are payment/footer noise, never category evidence — reusing
   // the same "start of totals section" boundary as item extraction, so the
-  // weak raw-text fallback never sees "VISA", "CASH", "MAYBANK", receipt
-  // numbers, "THANK YOU", etc.
+  // weak raw-text fallback never sees "VISA", "CASH", "MAYBANK", "QR",
+  // "E-WALLET", receipt numbers, "THANK YOU", etc.
   static String _stripFooterNoise(String rawText) {
     return rawText
         .split('\n')
@@ -652,8 +795,8 @@ class ReceiptScannerService {
       return (reliableMerchantCategory, FieldConfidence.high);
     }
 
-    final itemText = itemDescriptions.join(' ').toLowerCase();
-    final merchantLower = (merchantName ?? '').toLowerCase();
+    final itemText = _normalizeForMatching(itemDescriptions.join(' ').toLowerCase());
+    final merchantLower = _normalizeForMatching((merchantName ?? '').toLowerCase());
 
     final primaryScores = <String, int>{};
     void addPrimaryScore(String category, int amount) {
@@ -663,9 +806,12 @@ class ReceiptScannerService {
     for (final entry in _categoryKeywords.entries) {
       for (final keyword in entry.value) {
         final kw = keyword.toLowerCase();
-        if (_containsKeyword(itemText, kw)) addPrimaryScore(entry.key, _itemKeywordWeight);
+        final isWeak = _weakKeywords.contains(kw);
+        if (_containsKeyword(itemText, kw)) {
+          addPrimaryScore(entry.key, isWeak ? _weakKeywordWeight : _itemKeywordWeight);
+        }
         if (merchantLower.isNotEmpty && _containsKeyword(merchantLower, kw)) {
-          addPrimaryScore(entry.key, _merchantKeywordWeight);
+          addPrimaryScore(entry.key, isWeak ? _weakKeywordWeight : _merchantKeywordWeight);
         }
       }
     }
@@ -689,7 +835,7 @@ class ReceiptScannerService {
     // the totals/payment/footer section of the receipt.
     var scores = primaryScores;
     if (primaryScores.isEmpty && rawText.isNotEmpty) {
-      final rawLower = _stripFooterNoise(rawText).toLowerCase();
+      final rawLower = _normalizeForMatching(_stripFooterNoise(rawText).toLowerCase());
       final rawScores = <String, int>{};
       for (final entry in _categoryKeywords.entries) {
         for (final keyword in entry.value) {
@@ -775,7 +921,7 @@ class ReceiptScannerService {
   // ─────────────────────────── Payment keyword ───────────────────────────
 
   static String? _detectPaymentKeyword(String rawText) {
-    final lowerText = rawText.toLowerCase();
+    final lowerText = _normalizeForMatching(rawText.toLowerCase());
 
     for (final entry in _accountKeywords.entries) {
       for (final keyword in entry.value) {

@@ -105,6 +105,7 @@ void main() {
         localWallet: _cashWallet,
         existingCategories: const ['Food'],
         existingWallets: [_cashWallet],
+        imagePath: 'unused.jpg',
       );
 
       expect(result.usedAi, isFalse);

@@ -4,12 +4,18 @@ import cors from 'cors';
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+// Raised from 2mb to fit a base64-encoded receipt photo (the client only
+// sends one when the user explicitly opts into the AI check). The image is
+// used only for this one request and is never written to disk.
+app.use(express.json({ limit: '15mb' }));
 
 const PORT = process.env.PORT || 8787;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-const GEMINI_TIMEOUT_MS = 25_000;
+// Kept below the client's 15s AI timeout (see ReceiptAiConfig.timeout) so
+// this backend can still return a clean error response before the client
+// gives up and falls back to the local OCR/parser result.
+const GEMINI_TIMEOUT_MS = 12_000;
 
 const RECEIPT_FIELDS = [
   'merchant',
@@ -29,7 +35,20 @@ app.post('/api/receipt/parse', async (req, res) => {
     return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
   }
 
-  const { ocrText, lowConfidenceFields, categories, wallets, merchant, items } = req.body ?? {};
+  const {
+    ocrText,
+    lowConfidenceFields,
+    categories,
+    wallets,
+    merchant,
+    items,
+    localAmount,
+    localDate,
+    localCategory,
+    localWallet,
+    imageBase64,
+    imageMimeType,
+  } = req.body ?? {};
 
   if (typeof ocrText !== 'string' || ocrText.trim().length === 0) {
     return res.status(400).json({ error: 'ocrText is required.' });
@@ -48,6 +67,17 @@ app.post('/api/receipt/parse', async (req, res) => {
   const safeItems = Array.isArray(items)
     ? items.filter((i) => typeof i === 'string' && i.trim().length > 0)
     : [];
+  const safeLocalAmount = typeof localAmount === 'number' && Number.isFinite(localAmount) ? localAmount : null;
+  const safeLocalDate = typeof localDate === 'string' && localDate.trim().length > 0 ? localDate.trim() : null;
+  const safeLocalCategory =
+    typeof localCategory === 'string' && localCategory.trim().length > 0 ? localCategory.trim() : null;
+  const safeLocalWallet =
+    typeof localWallet === 'string' && localWallet.trim().length > 0 ? localWallet.trim() : null;
+  // The image, when present, is used only for this one request (passed
+  // straight through to Gemini) and is never written to disk or retained.
+  const safeImageBase64 = typeof imageBase64 === 'string' && imageBase64.trim().length > 0 ? imageBase64 : null;
+  const safeImageMimeType =
+    typeof imageMimeType === 'string' && imageMimeType.trim().length > 0 ? imageMimeType.trim() : 'image/jpeg';
 
   const prompt = buildPrompt({
     ocrText,
@@ -56,10 +86,18 @@ app.post('/api/receipt/parse', async (req, res) => {
     wallets: safeWallets,
     merchant: safeMerchant,
     items: safeItems,
+    localAmount: safeLocalAmount,
+    localDate: safeLocalDate,
+    localCategory: safeLocalCategory,
+    localWallet: safeLocalWallet,
+    hasImage: Boolean(safeImageBase64),
   });
 
   try {
-    const geminiJson = await callGemini(prompt);
+    const geminiJson = await callGemini(prompt, {
+      imageBase64: safeImageBase64,
+      imageMimeType: safeImageMimeType,
+    });
     const parsed = extractJson(geminiJson);
 
     if (!parsed) {
@@ -79,16 +117,37 @@ app.post('/api/receipt/parse', async (req, res) => {
   }
 });
 
-function buildPrompt({ ocrText, lowConfidenceFields, categories, wallets, merchant, items }) {
+function buildPrompt({
+  ocrText,
+  lowConfidenceFields,
+  categories,
+  wallets,
+  merchant,
+  items,
+  localAmount,
+  localDate,
+  localCategory,
+  localWallet,
+  hasImage,
+}) {
   return `You are extracting structured data from a retail receipt for a personal finance app.
 
 The receipt was already OCR-scanned and parsed locally. The local parser was NOT confident about
 these fields: ${lowConfidenceFields.length > 0 ? lowConfidenceFields.join(', ') : '(none listed)'}.
-Focus your effort on getting those right, but return every field.
+${hasImage
+    ? `The user has explicitly asked you to visually re-check the ENTIRE receipt against the attached
+photo — this is a full verification pass, not just a fix for the low-confidence fields above. The
+local parser's values below (including ones it was confident about) may still be wrong — for
+example it can misread a tax or service-charge line as the grand total. Trust what you can actually
+read in the image over both the OCR text and the local parser's values whenever they conflict.`
+    : 'No receipt image was provided — work only from the OCR text below.'}
 
-STRUCTURED CONTEXT ALREADY EXTRACTED LOCALLY (may be incomplete — use it, but verify against the
-full OCR text below):
+STRUCTURED CONTEXT ALREADY EXTRACTED LOCALLY (may be wrong — verify against the image/OCR text):
+- amount: ${localAmount != null ? localAmount : '(not identified locally)'}
+- date: ${localDate ? localDate : '(not identified locally)'}
 - merchant: ${merchant ? merchant : '(not identified locally)'}
+- category: ${localCategory ? localCategory : '(not identified locally)'}
+- wallet/payment: ${localWallet ? localWallet : '(not identified locally)'}
 - purchased items: ${items && items.length > 0 ? items.join(', ') : '(none extracted locally)'}
 
 FULL OCR TEXT (verbatim, may contain OCR noise/typos):
@@ -129,18 +188,23 @@ Respond with ONLY a single JSON object with exactly these keys, no markdown, no 
 ${JSON.stringify(RECEIPT_FIELDS)}`;
 }
 
-async function callGemini(prompt, attempt = 1) {
+async function callGemini(prompt, { imageBase64, imageMimeType } = {}, attempt = 1) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+  const parts = [{ text: prompt }];
+  if (imageBase64) {
+    parts.push({ inlineData: { mimeType: imageMimeType || 'image/jpeg', data: imageBase64 } });
+  }
 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        contents: [{ role: 'user', parts }],
         generationConfig: {
           temperature: 0,
           responseMimeType: 'application/json',
@@ -156,7 +220,7 @@ async function callGemini(prompt, attempt = 1) {
       if (response.status === 503 && attempt < 2) {
         clearTimeout(timeout);
         await new Promise((r) => setTimeout(r, 1000));
-        return callGemini(prompt, attempt + 1);
+        return callGemini(prompt, { imageBase64, imageMimeType }, attempt + 1);
       }
       const error = new Error(`Gemini API responded with ${response.status}`);
       error.status = response.status;

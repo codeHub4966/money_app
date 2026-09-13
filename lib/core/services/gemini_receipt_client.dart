@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:http/http.dart' as http;
 import '../config/receipt_ai_config.dart';
@@ -56,6 +57,16 @@ class GeminiReceiptResult {
 /// Flash. The Gemini API key never touches the client — it lives only in
 /// the backend's environment.
 class GeminiReceiptClient {
+  /// Best-effort image MIME type from the file extension — the backend only
+  /// uses this to tag the image part for Gemini's vision input.
+  static String _mimeTypeFor(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.heic')) return 'image/heic';
+    return 'image/jpeg';
+  }
+
   static Future<GeminiReceiptResult?> fetchEnhancement({
     required String ocrText,
     required List<String> lowConfidenceFields,
@@ -63,8 +74,27 @@ class GeminiReceiptClient {
     required List<String> existingWallets,
     String? merchant,
     List<String> itemDescriptions = const [],
+    // Local parser's own best-guess values, sent as extra context so Gemini
+    // can weigh them against what it sees in the image rather than starting
+    // from scratch.
+    double? localAmount,
+    String? localDate,
+    String? localCategory,
+    String? localWallet,
+    // Path to the original receipt photo on device — read and base64-encoded
+    // here so Gemini can inspect the image itself, not just the OCR text.
+    // Only sent when the user has explicitly opted into the AI check.
+    String? imagePath,
   }) async {
     try {
+      String? imageBase64;
+      String? imageMimeType;
+      if (imagePath != null) {
+        final bytes = await File(imagePath).readAsBytes();
+        imageBase64 = base64Encode(bytes);
+        imageMimeType = _mimeTypeFor(imagePath);
+      }
+
       final uri = Uri.parse('${ReceiptAiConfig.backendBaseUrl}/api/receipt/parse');
       final response = await http
           .post(
@@ -77,6 +107,12 @@ class GeminiReceiptClient {
               'wallets': existingWallets,
               'merchant': merchant,
               'items': itemDescriptions,
+              'localAmount': localAmount,
+              'localDate': localDate,
+              'localCategory': localCategory,
+              'localWallet': localWallet,
+              if (imageBase64 != null) 'imageBase64': imageBase64,
+              if (imageMimeType != null) 'imageMimeType': imageMimeType,
             }),
           )
           .timeout(ReceiptAiConfig.timeout);

@@ -55,16 +55,31 @@ class ReceiptWalletMatcher {
   // which bank issued the card, and carry no debit/credit qualifier.
   static const List<String> _genericCardWords = ['visa', 'mastercard', 'card'];
 
+  // 'duitnow' on its own is a generic QR-rail clue, not a specific wallet
+  // brand — several e-wallets and banks all support DuitNow QR, so it must
+  // never be treated as specifically Touch 'n Go (or any other named
+  // brand); it only ever resolves through this generic tier.
   static const List<String> _genericEwalletClues = [
-    'e wallet', 'ewallet', 'duitnow qr', 'qr pay', 'qr payment',
+    'e wallet', 'ewallet', 'duitnow qr', 'qr pay', 'qr payment', 'qr',
+    'duitnow', 'duit now',
   ];
+
+  /// OCR commonly misreads the letter "Q" in "QR" as the digit "0" — "0R",
+  /// "Q0" — which would otherwise stop "DUITNOW 0R" / "Q0 PAYMENT" from
+  /// matching the "qr"/"duitnow qr" clues above. Restricted to standalone
+  /// tokens so this never rewrites an unrelated digit/letter sequence
+  /// elsewhere on the receipt (a lot/room number, an item code).
+  static String _fixOcrPaymentMisreads(String normalized) {
+    return normalized.replaceAllMapped(RegExp(r'\b(?:0r|q0)\b'), (_) => 'qr');
+  }
 
   /// Lowercases and strips punctuation/whitespace runs down to single
   /// spaces, so brand names/keywords match regardless of case, apostrophes,
   /// dashes, or spacing (e.g. "Touch 'n Go" / "TOUCH-N-GO" / "touchngo" all
   /// normalize compatibly for phrase containment checks).
   static String _normalize(String s) {
-    return s.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]+"), ' ').trim();
+    final collapsed = s.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]+"), ' ').trim();
+    return _fixOcrPaymentMisreads(collapsed);
   }
 
   /// Whole-phrase containment: [phrase] must appear as a complete run of

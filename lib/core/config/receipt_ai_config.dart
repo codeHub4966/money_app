@@ -10,8 +10,10 @@ class ReceiptAiConfig {
     defaultValue: 'http://10.0.2.2:8787',
   );
 
-  /// Client-side timeout for the whole backend round trip. Kept above the
-  /// backend's own Gemini timeout (25s, see backend/server.js) so the
-  /// backend can return a clean error response before the client gives up.
-  static const Duration timeout = Duration(seconds: 30);
+  /// Client-side timeout for the whole backend round trip. Bounds how long
+  /// receipt scanning can be blocked waiting on the AI fallback — past this,
+  /// the local OCR/parser result is used instead. Kept above the backend's
+  /// own Gemini timeout (12s, see backend/server.js) so the backend can
+  /// return a clean error response before the client gives up.
+  static const Duration timeout = Duration(seconds: 15);
 }

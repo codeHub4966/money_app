@@ -317,6 +317,31 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     }
   }
 
+  /// Asks the user before the receipt image is ever uploaded to the AI
+  /// backend. Only shown when the local scan looks suspicious; returns
+  /// `true` for "Yes", `false`/`null` for "No" or a dismissed dialog.
+  Future<bool?> _confirmUseAiScan() {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Use AI to scan?'),
+        content: const Text(
+          'The receipt scan may be inaccurate. Use AI to check the receipt image and improve the result?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('No'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _scanReceipt() async {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
@@ -487,11 +512,28 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         );
       }
 
-      // Second pass: ReceiptEnrichmentService only actually calls the
-      // backend if a field is missing/low-confidence (see that class for
-      // the exact trigger rules); otherwise this resolves immediately with
-      // no network call. Never overwrites a high-confidence local field,
-      // and silently keeps the local result on any failure/timeout.
+      // Suspicious check: reuses the same confidence/conflict system that
+      // already gates every local field (amount ambiguity, low-confidence
+      // date/merchant/category, an unresolved payment clue, ...). The image
+      // is never sent to Gemini unless the user explicitly agrees below.
+      final lowConfidenceFields = ReceiptEnrichmentService.lowConfidenceFieldsFor(
+        local: receiptData,
+        localCategoryConfidence: categoryConfidence,
+        localWallet: matchedWallet,
+      );
+
+      if (kDebugMode) {
+        debugPrint('[AddTransactionScreen] suspicious fields: $lowConfidenceFields');
+      }
+
+      if (lowConfidenceFields.isEmpty || !mounted) return;
+
+      final useAi = await _confirmUseAiScan();
+      if (!mounted || useAi != true) return;
+
+      // Guard against a duplicate AI request while one is already in flight.
+      if (_enhancingWithAi) return;
+
       setState(() => _enhancingWithAi = true);
       final enriched = await ReceiptEnrichmentService.enrich(
         local: receiptData,
@@ -500,6 +542,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         localWallet: matchedWallet,
         existingCategories: existingLabels,
         existingWallets: wallets,
+        imagePath: pickedFile.path,
       );
       if (mounted) setState(() => _enhancingWithAi = false);
 
@@ -508,7 +551,14 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         debugPrint('[AddTransactionScreen] final wallet: ${(enriched.wallet ?? matchedWallet)?.name} (reason: $walletMatchReason)');
       }
 
-      if (!enriched.usedAi) return;
+      if (!mounted) return;
+
+      if (!enriched.usedAi) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't reach AI — keeping the scanned details")),
+        );
+        return;
+      }
 
       if (kDebugMode) {
         debugPrint('========== RECEIPT OCR (Gemini-enhanced) ==========');
@@ -520,12 +570,13 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         debugPrint('====================================================');
       }
 
-      if (!mounted) return;
-
+      // AI is a full verification pass here (the user explicitly opted in),
+      // so its values are applied even when the local field was previously
+      // high-confidence — see ReceiptEnrichmentService._merge.
       setState(() {
         if (enriched.amount != null) _amount = enriched.amount!.toStringAsFixed(2);
         if (enriched.date != null) _date = enriched.date!;
-        if (enriched.merchant != null && receiptData.merchantConfidence != FieldConfidence.high) {
+        if (enriched.merchant != null) {
           _noteCtrl.text = receiptData.itemDescriptions.isNotEmpty
               ? '${enriched.merchant} — ${receiptData.itemDescriptions.join(', ')}'
               : enriched.merchant!;
