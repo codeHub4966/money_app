@@ -135,6 +135,67 @@ class ReceiptEnrichmentService {
     );
   }
 
+  /// Explicit, user-initiated full AI verification pass — always calls
+  /// Gemini regardless of local field confidence (unlike [enrich], which
+  /// only calls Gemini when [lowConfidenceFieldsFor] flags something
+  /// suspicious). Backs a manual "Rescan with AI" action the user can
+  /// trigger anytime after local OCR has already auto-filled the form.
+  static Future<ReceiptEnrichmentResult> enrichForced({
+    required ReceiptData local,
+    required String? localCategory,
+    required FieldConfidence localCategoryConfidence,
+    required Wallet? localWallet,
+    required List<String> existingCategories,
+    required List<Wallet> existingWallets,
+    required String imagePath,
+  }) async {
+    final lowConfidenceFields = lowConfidenceFieldsFor(
+      local: local,
+      localCategoryConfidence: localCategoryConfidence,
+      localWallet: localWallet,
+    );
+
+    final localResult = ReceiptEnrichmentResult(
+      amount: local.amount,
+      date: local.date,
+      merchant: local.merchantName,
+      category: localCategory,
+      wallet: localWallet,
+    );
+
+    if (kDebugMode) {
+      debugPrint('[ReceiptEnrichmentService] forced rescan — low confidence fields: $lowConfidenceFields');
+    }
+
+    final gemini = await GeminiReceiptClient.fetchEnhancement(
+      ocrText: local.rawText,
+      lowConfidenceFields: lowConfidenceFields,
+      existingCategories: existingCategories,
+      existingWallets: existingWallets.map((w) => w.name).toList(),
+      merchant: local.merchantName,
+      itemDescriptions: local.itemDescriptions,
+      localAmount: local.amount,
+      localDate: local.date?.toIso8601String(),
+      localCategory: localCategory,
+      localWallet: localWallet?.name,
+      imagePath: imagePath,
+    );
+
+    // Backend/Gemini failed, timed out, no internet, returned invalid data,
+    // or the image upload failed — fall back to the current local result
+    // unchanged. Never crash the rescan over this.
+    if (gemini == null) return localResult;
+
+    return _merge(
+      local: local,
+      localCategory: localCategory,
+      localWallet: localWallet,
+      existingCategories: existingCategories,
+      existingWallets: existingWallets,
+      gemini: gemini,
+    );
+  }
+
   static ReceiptEnrichmentResult _merge({
     required ReceiptData local,
     required String? localCategory,

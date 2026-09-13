@@ -89,10 +89,18 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   String? _receiptImagePath;
   bool _scanningReceipt = false;
   bool _enhancingWithAi = false;
+  bool _rescanningWithAi = false;
   // Non-sensitive payment fingerprint (e.g. card last-4) detected on the
   // currently-attached receipt, if any — used to learn a wallet alias only
   // once the user actually confirms/saves this transaction.
   String? _receiptPaymentFingerprint;
+  // Local OCR result for the currently-attached receipt, kept around so the
+  // "Rescan with AI" button can send the same OCR text/context to Gemini
+  // without re-running the scan-and-auto-fill flow. Null until a fresh scan
+  // happens this session (e.g. when editing a transaction whose receipt was
+  // attached previously) — "Rescan with AI" lazily OCRs it first in that case.
+  ReceiptData? _lastReceiptData;
+  FieldConfidence? _lastCategoryConfidence;
 
   @override
   void initState() {
@@ -475,6 +483,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         _receiptImagePath = pickedFile.path;
         _receiptPaymentFingerprint = fingerprint;
         _scanningReceipt = false;
+        _lastReceiptData = receiptData;
+        _lastCategoryConfidence = categoryConfidence;
 
         if (receiptData.amount != null) {
           _amount = receiptData.amount!.toStringAsFixed(2);
@@ -600,6 +610,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         _scanningReceipt = false;
         _enhancingWithAi = false;
         _receiptImagePath = pickedFile.path; // Still attach the image
+        _lastReceiptData = null;
+        _lastCategoryConfidence = null;
       });
 
       if (mounted) {
@@ -607,6 +619,84 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
           const SnackBar(content: Text('Could not scan receipt, but image was attached')),
         );
       }
+    }
+  }
+
+  /// Explicit, user-initiated full AI verification pass over the already
+  /// attached receipt image — separate from the automatic popup-gated flow
+  /// in [_scanReceipt] above (left untouched). May be tapped any time after
+  /// local OCR has auto-filled the form, and always calls Gemini regardless
+  /// of field confidence, since tapping the button is itself the opt-in.
+  Future<void> _rescanWithAi() async {
+    if (_receiptImagePath == null) return;
+    if (_enhancingWithAi || _rescanningWithAi) return;
+
+    setState(() => _rescanningWithAi = true);
+
+    try {
+      // When editing a transaction whose receipt wasn't scanned this
+      // session, there's no ReceiptData yet — run local OCR once just to
+      // get text/context for the AI prompt. This does not re-auto-fill any
+      // fields; only the AI result below does.
+      var receiptData = _lastReceiptData;
+      receiptData ??= await ReceiptScannerService.scanReceipt(_receiptImagePath!);
+
+      final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+      final currentWallet = wallets.where((w) => w.id == _account).firstOrNull;
+      final key = _type == TransactionType.income ? 'income' : 'expense';
+      final categories = ref.read(categoriesProvider)[key] ?? [];
+      final existingLabels = categories.map((c) => c.label).toList();
+
+      final enriched = await ReceiptEnrichmentService.enrichForced(
+        local: receiptData,
+        localCategory: _category,
+        localCategoryConfidence: _lastCategoryConfidence ?? FieldConfidence.high,
+        localWallet: currentWallet,
+        existingCategories: existingLabels,
+        existingWallets: wallets,
+        imagePath: _receiptImagePath!,
+      );
+
+      if (!mounted) return;
+
+      if (!enriched.usedAi) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't reach AI — keeping current details")),
+        );
+        return;
+      }
+
+      final scannedItems = receiptData.itemDescriptions;
+      setState(() {
+        if (enriched.amount != null) _amount = enriched.amount!.toStringAsFixed(2);
+        if (enriched.date != null) _date = enriched.date!;
+        if (enriched.merchant != null) {
+          _noteCtrl.text = scannedItems.isNotEmpty
+              ? '${enriched.merchant} — ${scannedItems.join(', ')}'
+              : enriched.merchant!;
+        }
+        if (enriched.category != null) _category = enriched.category!;
+        if (enriched.wallet != null) _account = enriched.wallet!.id;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            enriched.amountNeedsVerification
+                ? 'AI-enhanced with Gemini — please verify the total'
+                : 'Receipt details enhanced with AI',
+          ),
+          backgroundColor: enriched.amountNeedsVerification ? Colors.orange : Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't reach AI — keeping current details")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _rescanningWithAi = false);
     }
   }
 
@@ -1056,62 +1146,116 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
   Widget _buildAttachmentRow() {
     final hasReceipt = _receiptImagePath != null;
-    final isBusy = _scanningReceipt || _enhancingWithAi;
+    final isBusy = _scanningReceipt || _enhancingWithAi || _rescanningWithAi;
 
-    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-      GestureDetector(
-        onTap: isBusy ? null : _scanReceipt,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: hasReceipt
-                ? AppTheme.primary.withValues(alpha: 0.1)
-                : AppTheme.surfaceContainerLow,
-            borderRadius: BorderRadius.circular(20),
-            border: hasReceipt
-                ? Border.all(color: AppTheme.primary, width: 1.5)
-                : null,
-          ),
-          child: Row(children: [
-            if (isBusy)
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              Icon(
-                hasReceipt ? Icons.receipt_long : Icons.camera_alt_outlined,
-                size: 20,
-                color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
-              ),
-            const SizedBox(width: 6),
-            Text(
-              _scanningReceipt
-                  ? 'Scanning...'
-                  : (_enhancingWithAi ? 'Verifying...' : (hasReceipt ? 'Receipt Attached' : 'Add Receipt')),
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
-              ),
+    return Wrap(
+      alignment: WrapAlignment.center,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        GestureDetector(
+          onTap: isBusy ? null : _scanReceipt,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: hasReceipt
+                  ? AppTheme.primary.withValues(alpha: 0.1)
+                  : AppTheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(20),
+              border: hasReceipt
+                  ? Border.all(color: AppTheme.primary, width: 1.5)
+                  : null,
             ),
-            if (hasReceipt && !isBusy) ...[
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () {
-                  setState(() {
-                    _receiptImagePath = null;
-                    _receiptPaymentFingerprint = null;
-                  });
-                },
-                child: Icon(Icons.close, size: 18, color: AppTheme.primary),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              if (_scanningReceipt)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else if (hasReceipt)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: Image.file(
+                    File(_receiptImagePath!),
+                    width: 22,
+                    height: 22,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const Icon(
+                      Icons.receipt_long,
+                      size: 20,
+                      color: AppTheme.primary,
+                    ),
+                  ),
+                )
+              else
+                const Icon(
+                  Icons.camera_alt_outlined,
+                  size: 20,
+                  color: AppTheme.onSurfaceVariant,
+                ),
+              const SizedBox(width: 6),
+              Text(
+                _scanningReceipt
+                    ? 'Scanning...'
+                    : (_enhancingWithAi ? 'Verifying...' : (hasReceipt ? 'Receipt Attached' : 'Add Receipt')),
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: hasReceipt ? AppTheme.primary : AppTheme.onSurfaceVariant,
+                ),
               ),
-            ],
-          ]),
+              if (hasReceipt && !isBusy) ...[
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _receiptImagePath = null;
+                      _receiptPaymentFingerprint = null;
+                      _lastReceiptData = null;
+                      _lastCategoryConfidence = null;
+                    });
+                  },
+                  child: Icon(Icons.close, size: 18, color: AppTheme.primary),
+                ),
+              ],
+            ]),
+          ),
         ),
-      ),
-    ]);
+        if (hasReceipt)
+          GestureDetector(
+            onTap: isBusy ? null : _rescanWithAi,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppTheme.secondary.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: AppTheme.secondary, width: 1.5),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (_rescanningWithAi)
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.secondary),
+                  )
+                else
+                  const Icon(Icons.auto_awesome, size: 18, color: AppTheme.secondary),
+                const SizedBox(width: 6),
+                Text(
+                  _rescanningWithAi ? 'Scanning...' : 'Rescan with AI',
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.secondary,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+      ],
+    );
   }
 
   Widget _buildConfirmButton() {

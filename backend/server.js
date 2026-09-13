@@ -188,11 +188,27 @@ Respond with ONLY a single JSON object with exactly these keys, no markdown, no 
 ${JSON.stringify(RECEIPT_FIELDS)}`;
 }
 
-async function callGemini(prompt, { imageBase64, imageMimeType } = {}, attempt = 1) {
+// Entry point: starts a single overall deadline that covers every attempt,
+// the retry delay, and the retry request itself — a 503 retry must NOT get
+// a fresh full timeout, or the combined wait can blow past the client's 15s
+// budget (see ReceiptAiConfig.timeout) and abandon the response anyway.
+async function callGemini(prompt, imageOptions = {}) {
+  const deadline = Date.now() + GEMINI_TIMEOUT_MS;
+  return callGeminiWithDeadline(prompt, imageOptions, deadline, 1);
+}
+
+async function callGeminiWithDeadline(prompt, { imageBase64, imageMimeType } = {}, deadline, attempt) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const error = new Error('Gemini request budget exhausted.');
+    error.name = 'AbortError';
+    throw error;
+  }
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), remaining);
 
   const parts = [{ text: prompt }];
   if (imageBase64) {
@@ -215,12 +231,14 @@ async function callGemini(prompt, { imageBase64, imageMimeType } = {}, attempt =
 
     if (!response.ok) {
       // 503 from Gemini means "temporarily overloaded, retry shortly" per
-      // Google's own error message — worth one quick retry before giving
-      // up and letting the client fall back to the local parser result.
-      if (response.status === 503 && attempt < 2) {
+      // Google's own error message — worth one quick retry, but only if
+      // there's still enough of the ORIGINAL budget left; the retry shares
+      // the same deadline rather than starting a fresh timeout.
+      const retryDelayMs = 1000;
+      if (response.status === 503 && attempt < 2 && deadline - Date.now() > retryDelayMs + 500) {
         clearTimeout(timeout);
-        await new Promise((r) => setTimeout(r, 1000));
-        return callGemini(prompt, { imageBase64, imageMimeType }, attempt + 1);
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        return callGeminiWithDeadline(prompt, { imageBase64, imageMimeType }, deadline, attempt + 1);
       }
       const error = new Error(`Gemini API responded with ${response.status}`);
       error.status = response.status;

@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show compute, kDebugMode, debugPrint;
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import '../config/receipt_ai_config.dart';
 
 /// Result returned by the backend's Gemini receipt-parsing endpoint.
@@ -67,6 +69,33 @@ class GeminiReceiptClient {
     return 'image/jpeg';
   }
 
+  // Longest edge the AI upload is downscaled to. The locally saved receipt
+  // photo (used for OCR and re-viewing the transaction) is never touched —
+  // this only affects the copy sent over the network, and this size is
+  // still comfortably enough to keep receipt text legible.
+  static const int _maxUploadDimension = 1600;
+  static const int _uploadJpegQuality = 82;
+
+  /// Runs off the UI isolate (via [compute]) since decode/resize/encode of a
+  /// full-resolution photo can take real time. Returns null when the bytes
+  /// aren't a format the `image` package can decode (e.g. HEIC) — the caller
+  /// falls back to sending the original bytes unmodified in that case.
+  static Uint8List? _compressForUpload(Uint8List original) {
+    final decoded = img.decodeImage(original);
+    if (decoded == null) return null;
+
+    final needsResize = decoded.width > _maxUploadDimension || decoded.height > _maxUploadDimension;
+    final resized = needsResize
+        ? img.copyResize(
+            decoded,
+            width: decoded.width >= decoded.height ? _maxUploadDimension : null,
+            height: decoded.height > decoded.width ? _maxUploadDimension : null,
+          )
+        : decoded;
+
+    return Uint8List.fromList(img.encodeJpg(resized, quality: _uploadJpegQuality));
+  }
+
   static Future<GeminiReceiptResult?> fetchEnhancement({
     required String ocrText,
     required List<String> lowConfidenceFields,
@@ -90,9 +119,20 @@ class GeminiReceiptClient {
       String? imageBase64;
       String? imageMimeType;
       if (imagePath != null) {
-        final bytes = await File(imagePath).readAsBytes();
-        imageBase64 = base64Encode(bytes);
-        imageMimeType = _mimeTypeFor(imagePath);
+        final rawBytes = await File(imagePath).readAsBytes();
+        // Downscale/recompress before upload — the original file on disk
+        // (used for local OCR and later re-viewing the receipt) is never
+        // modified, only this in-memory copy sent to the backend.
+        final compressed = await compute(_compressForUpload, rawBytes);
+        if (compressed != null) {
+          imageBase64 = base64Encode(compressed);
+          imageMimeType = 'image/jpeg';
+        } else {
+          // Format the `image` package couldn't decode (e.g. HEIC) — send
+          // the original bytes rather than dropping the image entirely.
+          imageBase64 = base64Encode(rawBytes);
+          imageMimeType = _mimeTypeFor(imagePath);
+        }
       }
 
       final uri = Uri.parse('${ReceiptAiConfig.backendBaseUrl}/api/receipt/parse');
