@@ -12,10 +12,12 @@ app.use(express.json({ limit: '15mb' }));
 const PORT = process.env.PORT || 8787;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-// Kept below the client's 15s AI timeout (see ReceiptAiConfig.timeout) so
+// Kept below the client's 55s AI timeout (see ReceiptAiConfig.timeout) so
 // this backend can still return a clean error response before the client
-// gives up and falls back to the local OCR/parser result.
-const GEMINI_TIMEOUT_MS = 12_000;
+// gives up and falls back to the local OCR/parser result. The gap between
+// the two also has to cover Render's free-tier cold-start delay, not just
+// this budget.
+const GEMINI_TIMEOUT_MS = 25_000;
 
 const RECEIPT_FIELDS = [
   'merchant',
@@ -190,7 +192,7 @@ ${JSON.stringify(RECEIPT_FIELDS)}`;
 
 // Entry point: starts a single overall deadline that covers every attempt,
 // the retry delay, and the retry request itself — a 503 retry must NOT get
-// a fresh full timeout, or the combined wait can blow past the client's 15s
+// a fresh full timeout, or the combined wait can blow past the client's 55s
 // budget (see ReceiptAiConfig.timeout) and abandon the response anyway.
 async function callGemini(prompt, imageOptions = {}) {
   const deadline = Date.now() + GEMINI_TIMEOUT_MS;

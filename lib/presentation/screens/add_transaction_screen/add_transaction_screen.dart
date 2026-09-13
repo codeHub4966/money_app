@@ -1144,18 +1144,47 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     );
   }
 
+  /// Shows the already-attached receipt photo at full size in a dismissible
+  /// overlay — tapping the "Receipt Attached" pill opens this instead of
+  /// re-triggering the picker; removing/replacing the receipt is still done
+  /// via the pill's own close ("x") icon.
+  void _viewFullReceiptImage() {
+    if (_receiptImagePath == null) return;
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (dialogContext) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          alignment: Alignment.topRight,
+          children: [
+            InteractiveViewer(
+              child: Image.file(File(_receiptImagePath!)),
+            ),
+            IconButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              icon: const Icon(Icons.close, color: Colors.white),
+              style: IconButton.styleFrom(backgroundColor: Colors.black54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildAttachmentRow() {
     final hasReceipt = _receiptImagePath != null;
     final isBusy = _scanningReceipt || _enhancingWithAi || _rescanningWithAi;
 
-    return Wrap(
-      alignment: WrapAlignment.center,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 10,
-      runSpacing: 10,
-      children: [
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
         GestureDetector(
-          onTap: isBusy ? null : _scanReceipt,
+          onTap: isBusy ? null : (hasReceipt ? _viewFullReceiptImage : _scanReceipt),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             decoration: BoxDecoration(
@@ -1254,7 +1283,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
               ]),
             ),
           ),
-      ],
+        ],
+      ),
     );
   }
 

@@ -180,6 +180,19 @@ class ReceiptScannerService {
     caseSensitive: false,
   );
 
+  // OCR frequently misreads the letter "O" in receipt keywords as the digit
+  // "0" (most commonly "T0TAL" for "TOTAL"). This normalization is applied
+  // to a throwaway copy of a line, used ONLY when checking the total/
+  // subtotal label regexes below — it never touches the line used to
+  // extract the actual price, the merchant name, or item text, so it can't
+  // corrupt an amount or accidentally rewrite unrelated text (no aggressive
+  // global replacement).
+  static String _normalizeTotalOcrTypos(String line) {
+    return line
+        .replaceAllMapped(RegExp(r'\bsub\s*t0tal\b', caseSensitive: false), (_) => 'subtotal')
+        .replaceAllMapped(RegExp(r'\bt0tal\b', caseSensitive: false), (_) => 'total');
+  }
+
   static Future<ReceiptData> scanReceipt(String imagePath) async {
     try {
       final inputImage = InputImage.fromFilePath(imagePath);
@@ -280,7 +293,8 @@ class ReceiptScannerService {
   static (double?, FieldConfidence) _extractAmount(List<String> lines) {
     final candidates = <({double value, int score, int lineIndex})>[];
 
-    int scoreLine(String line) {
+    int scoreLine(String rawLine) {
+      final line = _normalizeTotalOcrTypos(rawLine);
       var score = 0;
       final isGrandTotal = _grandTotalKw.hasMatch(line);
       final isBareTotal = !isGrandTotal && _bareTotalKw.hasMatch(line) && !_subtotalKw.hasMatch(line);
@@ -307,9 +321,10 @@ class ReceiptScannerService {
     final taxValues = <double>[];
     final serviceChargeValues = <double>[];
     final discountRoundingValues = <double>[];
-    for (final line in lines) {
-      final price = _extractFirstPrice(line);
+    for (final rawLine in lines) {
+      final price = _extractFirstPrice(rawLine);
       if (price == null) continue;
+      final line = _normalizeTotalOcrTypos(rawLine);
       if (_grandTotalKw.hasMatch(line) || _bareTotalKw.hasMatch(line)) continue;
       if (_subtotalKw.hasMatch(line)) {
         subtotalValue = price;
@@ -337,8 +352,9 @@ class ReceiptScannerService {
 
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i];
+      final normalizedLine = _normalizeTotalOcrTypos(line);
       final inlinePrice = _extractFirstPrice(line);
-      final hasTotalLabel = _grandTotalKw.hasMatch(line) || _bareTotalKw.hasMatch(line);
+      final hasTotalLabel = _grandTotalKw.hasMatch(normalizedLine) || _bareTotalKw.hasMatch(normalizedLine);
 
       if (inlinePrice != null) {
         addCandidate(inlinePrice, scoreLine(line), i);
@@ -354,11 +370,12 @@ class ReceiptScannerService {
       if (hasTotalLabel) {
         for (var offset = 1; offset <= 2 && i + offset < lines.length; offset++) {
           final nextLine = lines[i + offset];
-          final nextIsOtherLabel = _subtotalKw.hasMatch(nextLine) ||
-              _cashTenderedKw.hasMatch(nextLine) ||
-              _changeKw.hasMatch(nextLine) ||
-              _discountKw.hasMatch(nextLine) ||
-              _taxOnlyKw.hasMatch(nextLine);
+          final normalizedNextLine = _normalizeTotalOcrTypos(nextLine);
+          final nextIsOtherLabel = _subtotalKw.hasMatch(normalizedNextLine) ||
+              _cashTenderedKw.hasMatch(normalizedNextLine) ||
+              _changeKw.hasMatch(normalizedNextLine) ||
+              _discountKw.hasMatch(normalizedNextLine) ||
+              _taxOnlyKw.hasMatch(normalizedNextLine);
           if (nextIsOtherLabel) break;
 
           final nextPrice = _extractFirstPrice(nextLine);
@@ -646,6 +663,15 @@ class ReceiptScannerService {
 
   // ─────────────────────────── Item descriptions ───────────────────────────
 
+  // Some receipts print quantity and unit price BEFORE the item description
+  // rather than after it, e.g. "2PCS @ RM25.00 COMBO DESIGN TEE" — the
+  // description trails the price instead of leading it. Matched separately
+  // from the far more common "DESCRIPTION ... PRICE" layout below.
+  static final RegExp _qtyAtPricePattern = RegExp(
+    r'^\d+\s*(?:pcs?|pc|units?|unit|x)?\s*@\s*(?:rm|myr)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}\s+(\S.*)$',
+    caseSensitive: false,
+  );
+
   static List<String> _extractItemDescriptions(List<String> lines, String? merchantName) {
     final items = <String>[];
 
@@ -661,17 +687,24 @@ class ReceiptScannerService {
       // Once we reach the totals/payment/footer section, item lines are done.
       if (_totalsSectionPattern.hasMatch(trimmed)) break;
 
-      // Trailing tax-code letters after the price (e.g. "12.50 SR", "89.90 Z")
-      // are common on Malaysian receipts and are tolerated here — otherwise
-      // the end-of-line anchor would reject the entire item line.
-      final priceMatch = RegExp(
-        r'(?:rm|myr)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}(?:\s*[A-Z*]{1,2})?\s*$',
-        caseSensitive: false,
-      ).firstMatch(trimmed);
-      if (priceMatch == null) continue;
+      String description;
+      final qtyAtMatch = _qtyAtPricePattern.firstMatch(trimmed);
+      if (qtyAtMatch != null) {
+        description = qtyAtMatch.group(1)!;
+      } else {
+        // Trailing tax-code letters after the price (e.g. "12.50 SR", "89.90 Z")
+        // are common on Malaysian receipts and are tolerated here — otherwise
+        // the end-of-line anchor would reject the entire item line.
+        final priceMatch = RegExp(
+          r'(?:rm|myr)?\s*\d{1,3}(?:[.,]\d{3})*[.,]\d{2}(?:\s*[A-Z*]{1,2})?\s*$',
+          caseSensitive: false,
+        ).firstMatch(trimmed);
+        if (priceMatch == null) continue;
 
-      var description = trimmed.substring(0, priceMatch.start).trim();
-      description = description.replaceFirst(RegExp(r'^\d+\s*[xX]\s*'), '');
+        description = trimmed.substring(0, priceMatch.start).trim();
+        description = description.replaceFirst(RegExp(r'^\d+\s*[xX]\s*'), '');
+      }
+
       description = description.replaceAll(RegExp(r'\s{2,}'), ' ').trim();
 
       if (description.length < 2) continue;
@@ -920,8 +953,24 @@ class ReceiptScannerService {
 
   // ─────────────────────────── Payment keyword ───────────────────────────
 
+  // Boilerplate policy/disclaimer text (e.g. "STRICTLY NO CASH REFUND",
+  // "CASH REFUND NOT ALLOWED") happens to contain the word "cash" but is
+  // never the actual payment method used — printed on receipts regardless
+  // of how the customer paid. Lines matching this are excluded before
+  // keyword matching so they can't cause the wallet to be misdetected as
+  // Cash, letting the real payment line (e.g. "VISA [9330] 110.00")
+  // resolve correctly instead.
+  static final RegExp _paymentDisclaimerPattern = RegExp(
+    r'\b(no\s*cash\s*refund|cash\s*refund)\b',
+    caseSensitive: false,
+  );
+
   static String? _detectPaymentKeyword(String rawText) {
-    final lowerText = _normalizeForMatching(rawText.toLowerCase());
+    final filteredText = rawText
+        .split('\n')
+        .where((line) => !_paymentDisclaimerPattern.hasMatch(line))
+        .join('\n');
+    final lowerText = _normalizeForMatching(filteredText.toLowerCase());
 
     for (final entry in _accountKeywords.entries) {
       for (final keyword in entry.value) {
