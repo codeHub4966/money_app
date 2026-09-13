@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import '../../domain/models/wallet.dart';
 import 'gemini_receipt_client.dart';
 import 'receipt_scanner_service.dart';
@@ -84,13 +85,24 @@ class ReceiptEnrichmentService {
       wallet: localWallet,
     );
 
-    if (lowConfidenceFields.isEmpty) return localResult;
+    if (lowConfidenceFields.isEmpty) {
+      if (kDebugMode) {
+        debugPrint('[ReceiptEnrichmentService] Gemini trigger reason: none (all fields reliable)');
+      }
+      return localResult;
+    }
+
+    if (kDebugMode) {
+      debugPrint('[ReceiptEnrichmentService] Gemini trigger reason: $lowConfidenceFields');
+    }
 
     final gemini = await GeminiReceiptClient.fetchEnhancement(
       ocrText: local.rawText,
       lowConfidenceFields: lowConfidenceFields,
       existingCategories: existingCategories,
       existingWallets: existingWallets.map((w) => w.name).toList(),
+      merchant: local.merchantName,
+      itemDescriptions: local.itemDescriptions,
     );
 
     // Backend/Gemini failed, timed out, no internet, or rate-limited —

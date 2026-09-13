@@ -61,6 +61,8 @@ class GeminiReceiptClient {
     required List<String> lowConfidenceFields,
     required List<String> existingCategories,
     required List<String> existingWallets,
+    String? merchant,
+    List<String> itemDescriptions = const [],
   }) async {
     try {
       final uri = Uri.parse('${ReceiptAiConfig.backendBaseUrl}/api/receipt/parse');
@@ -73,6 +75,8 @@ class GeminiReceiptClient {
               'lowConfidenceFields': lowConfidenceFields,
               'categories': existingCategories,
               'wallets': existingWallets,
+              'merchant': merchant,
+              'items': itemDescriptions,
             }),
           )
           .timeout(ReceiptAiConfig.timeout);

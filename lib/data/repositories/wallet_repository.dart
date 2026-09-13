@@ -47,7 +47,7 @@ class LocalWalletRepository implements IWalletRepository {
   model.Wallet _toModel(Wallet row) => model.Wallet(
         id: row.id,
         name: row.name,
-        type: model.WalletType.values.byName(row.type),
+        type: model.WalletTypeStorage.fromStorageName(row.type),
         balance: row.balance,
         includeInTotal: row.includeInTotal,
       );

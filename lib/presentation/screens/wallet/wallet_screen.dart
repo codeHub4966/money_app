@@ -10,26 +10,26 @@ class WalletScreen extends ConsumerWidget {
   const WalletScreen({super.key});
 
   static const _typeIcons = {
+    'eWallet': Icons.account_balance_wallet_rounded,
+    'debitCard': Icons.payments_rounded,
+    'creditCard': Icons.credit_card_rounded,
     'bank': Icons.account_balance_rounded,
     'savings': Icons.savings_rounded,
-    'credit': Icons.credit_card_rounded,
-    'crypto': Icons.currency_bitcoin_rounded,
-    'cash': Icons.payments_rounded,
-    'other': Icons.account_balance_wallet_rounded,
+    'others': Icons.category_rounded,
   };
 
   static const _typeColors = {
+    'eWallet': Color(0xFF7C3AED),
+    'debitCard': AppTheme.secondary,
+    'creditCard': AppTheme.secondary,
     'bank': AppTheme.primary,
     'savings': AppTheme.primary,
-    'credit': AppTheme.secondary,
-    'crypto': Color(0xFF7C3AED),
-    'cash': AppTheme.primary,
-    'other': AppTheme.primary,
+    'others': AppTheme.primary,
   };
 
   static const _typeLabels = {
-    'bank': 'Bank Accounts', 'savings': 'Savings', 'credit': 'Credit Cards',
-    'crypto': 'Crypto', 'cash': 'Cash', 'other': 'E-Wallets',
+    'eWallet': 'E-Wallets', 'debitCard': 'Debit Cards', 'creditCard': 'Credit Cards',
+    'bank': 'Bank Accounts', 'savings': 'Savings', 'others': 'Others',
   };
 
   @override

@@ -63,7 +63,7 @@ void main() {
       const Wallet(
           id: 'wallet-a',
           name: 'Cash',
-          type: WalletType.cash,
+          type: WalletType.others,
           balance: 100,
           includeInTotal: true),
       const Wallet(

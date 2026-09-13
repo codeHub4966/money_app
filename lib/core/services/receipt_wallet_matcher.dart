@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import '../../domain/models/wallet.dart';
 
 /// Resolves a payment keyword detected on a receipt (e.g. `'maybank'`,
@@ -22,36 +23,53 @@ class ReceiptWalletMatcher {
   /// themselves.
   static const genericCardKeywords = {'visa', 'mastercard', 'debit', 'credit'};
 
+  /// Lowercases and strips punctuation/apostrophes so wallet names like
+  /// "Touch 'n Go" normalize the same way as the canonical detected keyword
+  /// `'touch n go'` — without this, the apostrophe alone would silently
+  /// defeat what should be an exact brand match.
+  static String _normalize(String s) {
+    return s.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]+"), ' ').trim();
+  }
+
   static Wallet? match(String? keyword, List<Wallet> wallets) {
     if (keyword == null || wallets.isEmpty) return null;
+    final normalizedKeyword = _normalize(keyword);
 
+    Wallet? result;
     if (keyword == 'cash') {
-      return _uniqueOrNull(
-        wallets.where((w) => w.type == WalletType.cash || w.name.toLowerCase().contains('cash')),
+      // There is no dedicated "cash" wallet type, so a cash wallet can only
+      // be recognized by name (e.g. a wallet named "Cash").
+      result = _uniqueOrNull(
+        wallets.where((w) => _normalize(w.name).contains('cash')),
       );
-    }
-
-    if (specificPaymentBrands.contains(keyword)) {
-      final exact = _uniqueOrNull(wallets.where((w) => w.name.toLowerCase() == keyword));
-      if (exact != null) return exact;
-      return _uniqueOrNull(
-        wallets.where(
-          (w) => w.name.toLowerCase().contains(keyword) || keyword.contains(w.name.toLowerCase()),
-        ),
-      );
-    }
-
-    if (genericCardKeywords.contains(keyword)) {
+    } else if (specificPaymentBrands.contains(keyword)) {
+      final exact = _uniqueOrNull(wallets.where((w) => _normalize(w.name) == normalizedKeyword));
+      result = exact ??
+          _uniqueOrNull(
+            wallets.where((w) {
+              final normalizedName = _normalize(w.name);
+              return normalizedName.contains(normalizedKeyword) ||
+                  normalizedKeyword.contains(normalizedName);
+            }),
+          );
+    } else if (genericCardKeywords.contains(keyword)) {
       // "Visa"/"Mastercard"/"Debit"/"Credit" identify a card network, not
       // which of the user's bank/credit wallets was actually used. Guessing
       // among several would silently pick the wrong bank, so this only
       // auto-fills when there is exactly one candidate wallet to guess.
-      return _uniqueOrNull(
-        wallets.where((w) => w.type == WalletType.bank || w.type == WalletType.credit),
+      result = _uniqueOrNull(
+        wallets.where((w) =>
+            w.type == WalletType.bank ||
+            w.type == WalletType.creditCard ||
+            w.type == WalletType.debitCard),
       );
     }
 
-    return null;
+    if (kDebugMode) {
+      debugPrint('[ReceiptWalletMatcher] keyword "$keyword" against '
+          '${wallets.map((w) => w.name).toList()} -> ${result?.name}');
+    }
+    return result;
   }
 
   /// Returns the single match, or null if there are zero or more than one —

@@ -12,6 +12,8 @@ import '../../../domain/models/app_category.dart';
 import '../../../core/services/receipt_scanner_service.dart';
 import '../../../core/services/receipt_enrichment_service.dart';
 import '../../../core/services/receipt_wallet_matcher.dart';
+import '../../../core/services/merchant_category_history.dart';
+import '../../../core/services/payment_alias_store.dart';
 import '../../providers/app_providers.dart';
 
 // Fixed colour palette cycled per category index
@@ -87,6 +89,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   String? _receiptImagePath;
   bool _scanningReceipt = false;
   bool _enhancingWithAi = false;
+  // Non-sensitive payment fingerprint (e.g. card last-4) detected on the
+  // currently-attached receipt, if any — used to learn a wallet alias only
+  // once the user actually confirms/saves this transaction.
+  String? _receiptPaymentFingerprint;
 
   @override
   void initState() {
@@ -284,6 +290,12 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       receiptImagePath: savedReceiptPath,
     ));
 
+    // Learn the payment-fingerprint -> wallet mapping only from this final,
+    // user-confirmed save — never from an automatic guess.
+    if (_receiptPaymentFingerprint != null) {
+      await PaymentAliasStore.learn(_receiptPaymentFingerprint!, wallet.id);
+    }
+
     if (mounted) context.pop();
   }
 
@@ -364,18 +376,41 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       final key = _type == TransactionType.income ? 'income' : 'expense';
       final categories = ref.read(categoriesProvider)[key] ?? [];
       final existingLabels = categories.map((c) => c.label).toList();
-      final merchantHistory = _buildMerchantCategoryHistory();
+
+      // Majority-based merchant history: only trusted as HIGH confidence
+      // when backed by enough consistent past transactions (see
+      // MerchantCategoryHistory) — a single accidental past category never
+      // permanently biases future scans for that merchant.
+      final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
+      final merchantHistory = MerchantCategoryHistory.build(transactions);
+      final reliableMerchantCategory = receiptData.merchantName != null
+          ? MerchantCategoryHistory.dominantCategory(merchantHistory, receiptData.merchantName!)
+          : null;
 
       final (suggestedCategory, categoryConfidence) = ReceiptScannerService.suggestCategory(
         merchantName: receiptData.merchantName,
         itemDescriptions: receiptData.itemDescriptions,
         rawText: receiptData.rawText,
         existingCategoryLabels: existingLabels,
-        merchantCategoryHistory: merchantHistory,
+        reliableMerchantCategory: reliableMerchantCategory,
       );
 
       final wallets = ref.read(walletsProvider).valueOrNull ?? [];
-      final matchedWallet = ReceiptWalletMatcher.match(receiptData.detectedPaymentKeyword, wallets);
+
+      // Learned card/payment alias (e.g. "VISA ****1234" -> a specific
+      // previously-confirmed wallet) takes priority over generic keyword
+      // matching, since it's evidence from the user's own confirmed choice.
+      final fingerprint = PaymentAliasStore.extractFingerprint(receiptData.rawText);
+      Wallet? matchedWallet;
+      String? learnedAliasMatch;
+      if (fingerprint != null) {
+        final learnedWalletId = await PaymentAliasStore.lookup(fingerprint);
+        if (learnedWalletId != null) {
+          matchedWallet = wallets.where((w) => w.id == learnedWalletId).firstOrNull;
+          learnedAliasMatch = matchedWallet?.name;
+        }
+      }
+      matchedWallet ??= ReceiptWalletMatcher.match(receiptData.detectedPaymentKeyword, wallets);
 
       if (kDebugMode) {
         debugPrint('========== RECEIPT OCR (local) ==========');
@@ -385,6 +420,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         debugPrint('Amount:\n${receiptData.amount} (${receiptData.amountConfidence})');
         debugPrint('Date:\n${receiptData.date} (${receiptData.dateConfidence})');
         debugPrint('Detected payment keyword:\n${receiptData.detectedPaymentKeyword}');
+        debugPrint('Payment fingerprint:\n$fingerprint');
+        debugPrint('Learned alias match:\n$learnedAliasMatch');
         debugPrint('Current categories:\n${existingLabels.join(', ')}');
         debugPrint('Suggested category:\n$suggestedCategory ($categoryConfidence)');
         debugPrint('Matched wallet:\n${matchedWallet?.name}');
@@ -396,6 +433,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       // Gemini correction is patched in afterward as a second pass.
       setState(() {
         _receiptImagePath = pickedFile.path;
+        _receiptPaymentFingerprint = fingerprint;
         _scanningReceipt = false;
 
         if (receiptData.amount != null) {
@@ -450,6 +488,11 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       );
       if (mounted) setState(() => _enhancingWithAi = false);
 
+      if (kDebugMode) {
+        debugPrint('[AddTransactionScreen] final category: ${enriched.category ?? suggestedCategory}');
+        debugPrint('[AddTransactionScreen] final wallet: ${(enriched.wallet ?? matchedWallet)?.name}');
+      }
+
       if (!enriched.usedAi) return;
 
       if (kDebugMode) {
@@ -499,23 +542,6 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         );
       }
     }
-  }
-
-  // Learns merchant -> category from past confirmed transactions, so a
-  // custom category (not in the built-in keyword list) still gets suggested
-  // next time the same merchant is scanned.
-  Map<String, String> _buildMerchantCategoryHistory() {
-    final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
-    final sorted = [...transactions]..sort((a, b) => b.date.compareTo(a.date));
-    final history = <String, String>{};
-    for (final t in sorted) {
-      final note = t.note;
-      if (note == null || note.isEmpty) continue;
-      final merchant = note.split(' — ').first.trim().toLowerCase();
-      if (merchant.isEmpty) continue;
-      history.putIfAbsent(merchant, () => t.category);
-    }
-    return history;
   }
 
   @override
@@ -726,12 +752,12 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
   String _walletEmoji(WalletType? type) {
     switch (type) {
-      case WalletType.bank:    return '🏦';
-      case WalletType.credit:  return '💳';
-      case WalletType.cash:    return '💵';
-      case WalletType.crypto:  return '🪙';
-      case WalletType.savings: return '🐷';
-      case WalletType.other:   return '📂';
+      case WalletType.eWallet:    return '📱';
+      case WalletType.debitCard:  return '🏧';
+      case WalletType.creditCard: return '💳';
+      case WalletType.bank:       return '🏦';
+      case WalletType.savings:    return '🐷';
+      case WalletType.others:     return '📂';
       default:                 return '👛';
     }
   }
@@ -1008,7 +1034,10 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: () {
-                  setState(() => _receiptImagePath = null);
+                  setState(() {
+                    _receiptImagePath = null;
+                    _receiptPaymentFingerprint = null;
+                  });
                 },
                 child: Icon(Icons.close, size: 18, color: AppTheme.primary),
               ),

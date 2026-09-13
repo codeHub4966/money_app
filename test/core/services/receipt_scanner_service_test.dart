@@ -210,6 +210,19 @@ THANK YOU
     });
   });
 
+  group('parseReceiptText — payment keyword priority', () {
+    test('detects the specific bank name, not the generic card network, when both appear', () {
+      final data = ReceiptScannerService.parseReceiptText('''
+STORE ABC
+TOTAL 10.00
+MAYBANK VISA
+''');
+      // A generic card network alone says nothing about which wallet was
+      // used — the specific brand must win when both are present.
+      expect(data.detectedPaymentKeyword, 'maybank');
+    });
+  });
+
   group('suggestCategory — ambiguity between equally-strong categories', () {
     test('does not claim high confidence on a genuine tie between two categories', () {
       final (category, confidence) = ReceiptScannerService.suggestCategory(
@@ -227,6 +240,65 @@ THANK YOU
         merchantName: 'Restoran ABC',
         itemDescriptions: ['nasi lemak', 'teh tarik'],
         existingCategoryLabels: ['Food', 'Transport'],
+      );
+      expect(category, 'Food');
+      expect(confidence, FieldConfidence.high);
+    });
+  });
+
+  group('suggestCategory — rebalanced priority (items/merchant over raw OCR)', () {
+    test('item keywords beat raw OCR noise', () {
+      final (category, confidence) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['nasi lemak', 'teh tarik'],
+        // Loaded with Transportation keywords that would otherwise win if
+        // raw text were weighted anywhere near items.
+        rawText: 'GRAB UBER TAXI PARKING PETROL SHELL PETRONAS FUEL TOLL BUS TRAIN',
+        existingCategoryLabels: ['Food', 'Transportation'],
+      );
+      expect(category, 'Food');
+      expect(confidence, FieldConfidence.high);
+    });
+
+    test('merchant keywords beat raw OCR noise', () {
+      final (category, confidence) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Kopitiam Restoran ABC',
+        rawText: 'GRAB UBER TAXI PARKING PETROL SHELL PETRONAS FUEL TOLL BUS TRAIN LRT MRT',
+        existingCategoryLabels: ['Food', 'Transportation'],
+      );
+      expect(category, 'Food');
+      expect(confidence, FieldConfidence.high);
+    });
+
+    test('payment/footer terms do not change category even in the raw-text fallback path', () {
+      // No item/merchant evidence at all, so the raw-text fallback runs —
+      // but the only Transportation-ish word ("PARKING") sits on a line
+      // that also contains "CASH", which marks it as footer/payment noise
+      // and drops the whole line before raw-text scoring.
+      final (category, _) = ReceiptScannerService.suggestCategory(
+        rawText: 'STORE ABC\nMOVIE TICKET\nCASH PARKING TOLL BUS\n',
+        existingCategoryLabels: ['Entertainment', 'Transportation'],
+      );
+      expect(category, 'Entertainment');
+    });
+  });
+
+  group('suggestCategory — reliable merchant-history override', () {
+    test('returns the reliable merchant-history category at high confidence, bypassing scoring', () {
+      final (category, confidence) = ReceiptScannerService.suggestCategory(
+        merchantName: 'Tealive',
+        itemDescriptions: ['nasi lemak'], // would otherwise score "Food"
+        existingCategoryLabels: ['Food', 'Snacks'],
+        reliableMerchantCategory: 'Snacks',
+      );
+      expect(category, 'Snacks');
+      expect(confidence, FieldConfidence.high);
+    });
+
+    test('falls back to normal scoring when the reliable category is not an existing label', () {
+      final (category, confidence) = ReceiptScannerService.suggestCategory(
+        itemDescriptions: ['nasi lemak'],
+        existingCategoryLabels: ['Food', 'Snacks'],
+        reliableMerchantCategory: 'Groceries', // not in the list
       );
       expect(category, 'Food');
       expect(confidence, FieldConfidence.high);

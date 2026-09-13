@@ -29,7 +29,7 @@ app.post('/api/receipt/parse', async (req, res) => {
     return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
   }
 
-  const { ocrText, lowConfidenceFields, categories, wallets } = req.body ?? {};
+  const { ocrText, lowConfidenceFields, categories, wallets, merchant, items } = req.body ?? {};
 
   if (typeof ocrText !== 'string' || ocrText.trim().length === 0) {
     return res.status(400).json({ error: 'ocrText is required.' });
@@ -44,12 +44,18 @@ app.post('/api/receipt/parse', async (req, res) => {
   const safeWallets = Array.isArray(wallets)
     ? wallets.filter((w) => typeof w === 'string' && w.trim().length > 0)
     : [];
+  const safeMerchant = typeof merchant === 'string' && merchant.trim().length > 0 ? merchant.trim() : null;
+  const safeItems = Array.isArray(items)
+    ? items.filter((i) => typeof i === 'string' && i.trim().length > 0)
+    : [];
 
   const prompt = buildPrompt({
     ocrText,
     lowConfidenceFields: safeLowConfidenceFields,
     categories: safeCategories,
     wallets: safeWallets,
+    merchant: safeMerchant,
+    items: safeItems,
   });
 
   try {
@@ -73,12 +79,17 @@ app.post('/api/receipt/parse', async (req, res) => {
   }
 });
 
-function buildPrompt({ ocrText, lowConfidenceFields, categories, wallets }) {
+function buildPrompt({ ocrText, lowConfidenceFields, categories, wallets, merchant, items }) {
   return `You are extracting structured data from a retail receipt for a personal finance app.
 
 The receipt was already OCR-scanned and parsed locally. The local parser was NOT confident about
 these fields: ${lowConfidenceFields.length > 0 ? lowConfidenceFields.join(', ') : '(none listed)'}.
 Focus your effort on getting those right, but return every field.
+
+STRUCTURED CONTEXT ALREADY EXTRACTED LOCALLY (may be incomplete — use it, but verify against the
+full OCR text below):
+- merchant: ${merchant ? merchant : '(not identified locally)'}
+- purchased items: ${items && items.length > 0 ? items.join(', ') : '(none extracted locally)'}
 
 FULL OCR TEXT (verbatim, may contain OCR noise/typos):
 """
@@ -96,12 +107,19 @@ RULES:
    service charge, cash tendered, change given, or a discount amount as the total — those are different
    numbers on the receipt and must not be confused with the grand total.
 2. "suggested_category" must be exactly one string from the EXISTING CATEGORIES list above, or null if
-   none fit. Never invent a new category name.
+   none fit. Never invent a new category name. When choosing it, prioritize evidence in this order:
+   (a) the merchant identity, (b) the purchased items, (c) the overall receipt context/OCR text as a
+   last resort. Ignore payment/footer text entirely for this decision — words like "CASH", "VISA",
+   "MASTERCARD", "MAYBANK", card numbers, receipt/invoice numbers, "THANK YOU", etc. say nothing about
+   what was purchased and must not influence the category. Return null rather than guess if the
+   merchant and items don't clearly support any single listed category.
 3. "suggested_wallet" must be exactly one string from the EXISTING WALLETS list above, or null. Only
    return a wallet if the receipt contains a clear payment clue (e.g. "CASH", "VISA", "MASTERCARD", a
    bank name, "Touch 'n Go", "TNG", "DuitNow", "GrabPay", "Boost", "ShopeePay", card last-4 digits, etc.)
-   that reliably maps to one of the listed wallets. If you are not confident, return null. Never invent
-   a wallet name that isn't in the list.
+   that reliably maps to one of the listed wallets. A generic card network alone (VISA/Mastercard/Debit/
+   Credit) is NOT sufficient evidence unless exactly one listed wallet could plausibly be it — if more
+   than one wallet could match, or the clue is ambiguous, return null. Never invent a wallet name that
+   isn't in the list.
 4. "transaction_date" must be an ISO 8601 date string ("YYYY-MM-DD"), or null if not found.
 5. "total_amount" must be a plain number (no currency symbol), or null if not found.
 6. "currency" is a best-effort 3-letter ISO code (e.g. "MYR", "USD") if identifiable, else null.

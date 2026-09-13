@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'receipt_text_layout.dart';
 
@@ -98,10 +99,14 @@ class ReceiptScannerService {
     ],
   };
 
-  // Payment method keywords for account matching.
+  // Payment method keywords for account matching. Order matters:
+  // _detectPaymentKeyword returns the FIRST matching entry, so specific
+  // evidence (a named bank or e-wallet, or cash) is listed ahead of generic
+  // card-network words (visa/mastercard/debit/credit) — a receipt printing
+  // both, e.g. "MAYBANK VISA", must resolve to the specific brand ('maybank')
+  // rather than the generic card network that says nothing about which
+  // wallet was actually used.
   static final Map<String, List<String>> _accountKeywords = {
-    'visa': ['visa'],
-    'mastercard': ['mastercard', 'master card'],
     'maybank': ['maybank', 'may bank', 'mbb'],
     'cimb': ['cimb'],
     'public bank': ['public bank', 'pbb'],
@@ -113,6 +118,8 @@ class ReceiptScannerService {
     'grabpay': ['grabpay', 'grab pay'],
     'shopeepay': ['shopeepay', 'shopee pay'],
     'cash': ['cash', 'tunai'],
+    'visa': ['visa'],
+    'mastercard': ['mastercard', 'master card'],
     'debit': ['debit'],
     'credit': ['credit'],
   };
@@ -601,41 +608,65 @@ class ReceiptScannerService {
 
   // ─────────────────────────── Category ───────────────────────────
 
-  /// Suggests a category using (in order of confidence): learned
-  /// merchant→category history, extracted item descriptions, the merchant
-  /// name, existing category labels, and finally the raw OCR text as a weak
-  /// fallback. When [existingCategoryLabels] is non-empty, only a label from
+  // Weights used by suggestCategory's scoring pass. Item descriptions and
+  // merchant keywords are direct, structured evidence (what was actually
+  // bought, from whom) and are weighted far above the raw OCR text, which
+  // also contains totals/payment/footer noise ("MAYBANK", "VISA", "CASH",
+  // "CARD", receipt/invoice numbers, "THANK YOU", ...) that must not be
+  // allowed to meaningfully sway category selection.
+  static const int _itemKeywordWeight = 5;
+  static const int _merchantKeywordWeight = 3;
+  static const int _rawTextKeywordWeight = 1;
+
+  // Lines that are payment/footer noise, never category evidence — reusing
+  // the same "start of totals section" boundary as item extraction, so the
+  // weak raw-text fallback never sees "VISA", "CASH", "MAYBANK", receipt
+  // numbers, "THANK YOU", etc.
+  static String _stripFooterNoise(String rawText) {
+    return rawText
+        .split('\n')
+        .where((line) => !_totalsSectionPattern.hasMatch(line))
+        .join(' ');
+  }
+
+  /// Suggests a category using (in order of priority): a reliable, already
+  /// majority-vetted merchant→category history entry (see
+  /// [MerchantCategoryHistory] — this method does not itself decide
+  /// reliability), extracted item descriptions, merchant-name keywords,
+  /// existing category labels, and finally the raw OCR text as a very weak
+  /// fallback that only contributes when item/merchant evidence is entirely
+  /// absent. When [existingCategoryLabels] is non-empty, only a label from
   /// that list is ever returned — this method never invents a category.
   static (String?, FieldConfidence) suggestCategory({
     String? merchantName,
     List<String> itemDescriptions = const [],
     String rawText = '',
     List<String> existingCategoryLabels = const [],
-    Map<String, String> merchantCategoryHistory = const {},
+    String? reliableMerchantCategory,
   }) {
-    if (merchantName != null && merchantName.isNotEmpty) {
-      final learned = merchantCategoryHistory[merchantName.toLowerCase().trim()];
-      if (learned != null &&
-          (existingCategoryLabels.isEmpty || existingCategoryLabels.contains(learned))) {
-        return (learned, FieldConfidence.high);
+    if (reliableMerchantCategory != null &&
+        (existingCategoryLabels.isEmpty || existingCategoryLabels.contains(reliableMerchantCategory))) {
+      if (kDebugMode) {
+        debugPrint('[suggestCategory] using reliable merchant history: $reliableMerchantCategory');
       }
+      return (reliableMerchantCategory, FieldConfidence.high);
     }
 
     final itemText = itemDescriptions.join(' ').toLowerCase();
     final merchantLower = (merchantName ?? '').toLowerCase();
-    final rawLower = rawText.toLowerCase();
 
-    final scores = <String, int>{};
-    void addScore(String category, int amount) {
-      scores[category] = (scores[category] ?? 0) + amount;
+    final primaryScores = <String, int>{};
+    void addPrimaryScore(String category, int amount) {
+      primaryScores[category] = (primaryScores[category] ?? 0) + amount;
     }
 
     for (final entry in _categoryKeywords.entries) {
       for (final keyword in entry.value) {
         final kw = keyword.toLowerCase();
-        if (_containsKeyword(itemText, kw)) addScore(entry.key, 4);
-        if (merchantLower.isNotEmpty && _containsKeyword(merchantLower, kw)) addScore(entry.key, 2);
-        if (_containsKeyword(rawLower, kw)) addScore(entry.key, 1);
+        if (_containsKeyword(itemText, kw)) addPrimaryScore(entry.key, _itemKeywordWeight);
+        if (merchantLower.isNotEmpty && _containsKeyword(merchantLower, kw)) {
+          addPrimaryScore(entry.key, _merchantKeywordWeight);
+        }
       }
     }
 
@@ -646,10 +677,32 @@ class ReceiptScannerService {
       for (final word in words) {
         final singular = word.endsWith('s') ? word.substring(0, word.length - 1) : word;
         for (final form in {word, singular}) {
-          if (itemText.contains(form)) addScore(label, 3);
-          if (merchantLower.contains(form)) addScore(label, 2);
+          if (itemText.contains(form)) addPrimaryScore(label, _itemKeywordWeight - 1);
+          if (merchantLower.contains(form)) addPrimaryScore(label, _merchantKeywordWeight - 1);
         }
       }
+    }
+
+    // Raw OCR text is only ever consulted as a last resort, when items and
+    // the merchant name gave literally no signal at all — never to
+    // reinforce or override evidence that already exists, and never from
+    // the totals/payment/footer section of the receipt.
+    var scores = primaryScores;
+    if (primaryScores.isEmpty && rawText.isNotEmpty) {
+      final rawLower = _stripFooterNoise(rawText).toLowerCase();
+      final rawScores = <String, int>{};
+      for (final entry in _categoryKeywords.entries) {
+        for (final keyword in entry.value) {
+          if (_containsKeyword(rawLower, keyword.toLowerCase())) {
+            rawScores[entry.key] = (rawScores[entry.key] ?? 0) + _rawTextKeywordWeight;
+          }
+        }
+      }
+      scores = rawScores;
+    }
+
+    if (kDebugMode) {
+      debugPrint('[suggestCategory] candidate scores: $scores');
     }
 
     if (scores.isEmpty) return (null, FieldConfidence.missing);
@@ -679,6 +732,9 @@ class ReceiptScannerService {
     final confidence = (ranked.first.value >= _highCategoryScore && !isAmbiguous)
         ? FieldConfidence.high
         : FieldConfidence.low;
+    if (kDebugMode) {
+      debugPrint('[suggestCategory] resolved: ${ranked.first.key} ($confidence)');
+    }
     return (ranked.first.key, confidence);
   }
 

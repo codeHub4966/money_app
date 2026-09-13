@@ -8,12 +8,12 @@ import '../../../domain/models/transaction.dart';
 import '../../providers/app_providers.dart';
 
 const _types = [
+  {'id': 'eWallet', 'icon': '📱', 'label': 'E-wallet'},
+  {'id': 'debitCard', 'icon': '🏧', 'label': 'Debit Card'},
+  {'id': 'creditCard', 'icon': '💳', 'label': 'Credit Card'},
   {'id': 'bank', 'icon': '🏛️', 'label': 'Bank'},
-  {'id': 'credit', 'icon': '💳', 'label': 'Credit'},
-  {'id': 'cash', 'icon': '💵', 'label': 'Cash'},
-  {'id': 'crypto', 'icon': '🪙', 'label': 'Crypto'},
   {'id': 'savings', 'icon': '🐷', 'label': 'Savings'},
-  {'id': 'other', 'icon': '📁', 'label': 'Other'},
+  {'id': 'others', 'icon': '📁', 'label': 'Others'},
 ];
 
 class AddWalletScreen extends ConsumerStatefulWidget {
@@ -40,7 +40,7 @@ class _State extends ConsumerState<AddWalletScreen> {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.initialName ?? '');
     _amount = widget.initialBalance != null ? widget.initialBalance!.toStringAsFixed(2) : '';
-    _type = widget.initialType ?? 'credit';
+    _type = widget.initialType ?? 'eWallet';
     _includeInTotal = widget.initialIncludeInTotal ?? true;
   }
 

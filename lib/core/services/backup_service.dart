@@ -143,7 +143,7 @@ class BackupService {
         await walletRepo.add(Wallet(
           id: w['id'] as String,
           name: w['name'] as String,
-          type: WalletType.values.byName(w['type'] as String),
+          type: WalletTypeStorage.fromStorageName(w['type'] as String),
           balance: (w['balance'] as num).toDouble(),
           includeInTotal: w['includeInTotal'] as bool,
         ));
