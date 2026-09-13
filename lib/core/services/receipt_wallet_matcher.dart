@@ -1,82 +1,218 @@
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
+import '../../domain/models/transaction.dart';
 import '../../domain/models/wallet.dart';
+import 'wallet_usage_stats.dart';
 
-/// Resolves a payment keyword detected on a receipt (e.g. `'maybank'`,
-/// `'visa'`, `'cash'`) to one of the user's existing wallets.
+/// Resolves a scanned receipt to one of the user's existing wallets, using
+/// (in priority order):
 ///
-/// Extracted as a standalone, pure function (no widget/provider
-/// dependencies) so it can be unit tested directly against fixture wallet
-/// lists, and reused consistently wherever a receipt scan needs to guess a
-/// wallet.
+///  1. an explicit bank/e-wallet/cash name match (handled here by name);
+///     the caller checks a *learned payment alias* before this, since that's
+///     evidence from the user's own confirmed choice and outranks everything
+///     below.
+///  2. an explicit debit/credit qualifier ("DEBIT CARD", "VISA CREDIT", ...)
+///     -> the most-used wallet of that specific type;
+///  3. a bare card network with no qualifier ("VISA", "MASTERCARD", "CARD")
+///     -> the most-used wallet among debit + credit wallets;
+///  4. a generic e-wallet clue ("E-WALLET", "QR PAYMENT", "DUITNOW QR", ...)
+///     -> the most-used e-wallet;
+///  5. no reliable clue at all -> the most-used "others" wallet;
+///  6. nothing to fall back on -> whichever wallet is already selected.
+///
+/// Pure/stateless (no widget/provider dependencies) so it can be unit tested
+/// directly against fixture wallet/transaction lists.
 class ReceiptWalletMatcher {
   ReceiptWalletMatcher._();
 
-  /// Payment brands specific enough to identify a particular wallet by name
-  /// (a bank, or an e-wallet), as opposed to [genericCardKeywords].
-  static const specificPaymentBrands = {
-    'touch n go', 'grabpay', 'boost', 'shopeepay', 'maybank', 'cimb',
-    'public bank', 'hong leong', 'rhb', 'ambank',
+  /// Bank names specific enough to identify a particular wallet by name.
+  static const Map<String, List<String>> bankBrands = {
+    'maybank': ['maybank', 'may bank', 'mbb'],
+    'cimb': ['cimb'],
+    'public bank': ['public bank', 'pbb'],
+    'hong leong': ['hong leong', 'hlb'],
+    'rhb': ['rhb'],
+    'ambank': ['ambank', 'am bank'],
   };
 
-  /// Card-network words that appear on almost any card receipt regardless of
-  /// which bank issued the card — they never identify a specific wallet by
-  /// themselves.
-  static const genericCardKeywords = {'visa', 'mastercard', 'debit', 'credit'};
+  /// E-wallet brands specific enough to identify a particular wallet by name.
+  static const Map<String, List<String>> eWalletBrands = {
+    'touch n go': ['touch n go', 'tng', 'touchngo', 'touch & go'],
+    'mae': ['mae'],
+    'grabpay': ['grabpay', 'grab pay'],
+    'boost': ['boost'],
+    'shopeepay': ['shopeepay', 'shopee pay'],
+  };
 
-  /// Lowercases and strips punctuation/apostrophes so wallet names like
-  /// "Touch 'n Go" normalize the same way as the canonical detected keyword
-  /// `'touch n go'` — without this, the apostrophe alone would silently
-  /// defeat what should be an exact brand match.
+  static const List<String> _cashKeywords = ['cash', 'tunai'];
+
+  // "Debit"/"credit" are checked as independent qualifiers (not tied to a
+  // single first-match scan) so "VISA DEBIT" is recognized as a debit-card
+  // clue rather than merely a generic "visa" one.
+  static const List<String> _debitQualifiers = ['debit'];
+  static const List<String> _creditQualifiers = ['credit'];
+
+  // Card-network words that appear on almost any card receipt regardless of
+  // which bank issued the card, and carry no debit/credit qualifier.
+  static const List<String> _genericCardWords = ['visa', 'mastercard', 'card'];
+
+  static const List<String> _genericEwalletClues = [
+    'e wallet', 'ewallet', 'duitnow qr', 'qr pay', 'qr payment',
+  ];
+
+  /// Lowercases and strips punctuation/whitespace runs down to single
+  /// spaces, so brand names/keywords match regardless of case, apostrophes,
+  /// dashes, or spacing (e.g. "Touch 'n Go" / "TOUCH-N-GO" / "touchngo" all
+  /// normalize compatibly for phrase containment checks).
   static String _normalize(String s) {
     return s.toLowerCase().replaceAll(RegExp(r"[^a-z0-9]+"), ' ').trim();
   }
 
-  static Wallet? match(String? keyword, List<Wallet> wallets) {
-    if (keyword == null || wallets.isEmpty) return null;
-    final normalizedKeyword = _normalize(keyword);
+  /// Whole-phrase containment: [phrase] must appear as a complete run of
+  /// normalized tokens inside [normalizedText], not merely as a substring
+  /// (so "mae" doesn't fire on "name", and "card" doesn't fire on
+  /// "discard").
+  static bool _containsPhrase(String normalizedText, String phrase) {
+    return ' $normalizedText '.contains(' ${_normalize(phrase)} ');
+  }
 
-    Wallet? result;
-    if (keyword == 'cash') {
-      // There is no dedicated "cash" wallet type, so a cash wallet can only
-      // be recognized by name (e.g. a wallet named "Cash").
-      result = _uniqueOrNull(
-        wallets.where((w) => _normalize(w.name).contains('cash')),
-      );
-    } else if (specificPaymentBrands.contains(keyword)) {
-      final exact = _uniqueOrNull(wallets.where((w) => _normalize(w.name) == normalizedKeyword));
-      result = exact ??
-          _uniqueOrNull(
-            wallets.where((w) {
-              final normalizedName = _normalize(w.name);
-              return normalizedName.contains(normalizedKeyword) ||
-                  normalizedKeyword.contains(normalizedName);
-            }),
-          );
-    } else if (genericCardKeywords.contains(keyword)) {
-      // "Visa"/"Mastercard"/"Debit"/"Credit" identify a card network, not
-      // which of the user's bank/credit wallets was actually used. Guessing
-      // among several would silently pick the wrong bank, so this only
-      // auto-fills when there is exactly one candidate wallet to guess.
-      result = _uniqueOrNull(
-        wallets.where((w) =>
-            w.type == WalletType.bank ||
-            w.type == WalletType.creditCard ||
-            w.type == WalletType.debitCard),
-      );
+  static bool _containsAny(String normalizedText, List<String> phrases) {
+    return phrases.any((p) => _containsPhrase(normalizedText, p));
+  }
+
+  /// The evidence detected on a receipt, before any wallet is chosen.
+  /// Exposed as its own function so the detection step can be tested/logged
+  /// independently of which wallets happen to exist.
+  static ({
+    String? specificBrand,
+    bool isCash,
+    String? cardTypeHint,
+    bool hasGenericCard,
+    bool hasGenericEwallet,
+  }) detectPaymentClue(String rawText) {
+    final normalized = _normalize(rawText);
+
+    String? specificBrand;
+    for (final entry in {...bankBrands, ...eWalletBrands}.entries) {
+      if (_containsAny(normalized, entry.value)) {
+        specificBrand = entry.key;
+        break;
+      }
     }
 
+    final isCash = _containsAny(normalized, _cashKeywords);
+
+    String? cardTypeHint;
+    if (_containsAny(normalized, _debitQualifiers)) {
+      cardTypeHint = 'debit';
+    } else if (_containsAny(normalized, _creditQualifiers)) {
+      cardTypeHint = 'credit';
+    }
+
+    final hasGenericCard = _containsAny(normalized, _genericCardWords);
+    final hasGenericEwallet = _containsAny(normalized, _genericEwalletClues);
+
+    final clue = (
+      specificBrand: specificBrand,
+      isCash: isCash,
+      cardTypeHint: cardTypeHint,
+      hasGenericCard: hasGenericCard,
+      hasGenericEwallet: hasGenericEwallet,
+    );
     if (kDebugMode) {
-      debugPrint('[ReceiptWalletMatcher] keyword "$keyword" against '
-          '${wallets.map((w) => w.name).toList()} -> ${result?.name}');
+      debugPrint('[ReceiptWalletMatcher] detected payment clues: $clue');
     }
-    return result;
+    return clue;
   }
 
   /// Returns the single match, or null if there are zero or more than one —
   /// an ambiguous match is treated the same as no match, since a wrong
-  /// confident guess is worse than leaving the field for the user.
+  /// confident guess is worse than leaving it for a fallback tier.
   static Wallet? _uniqueOrNull(Iterable<Wallet> matches) {
     final list = matches.toList();
     return list.length == 1 ? list.first : null;
+  }
+
+  static Wallet? _matchByExplicitName(String normalizedKeyword, List<Wallet> wallets) {
+    final exact = _uniqueOrNull(wallets.where((w) => _normalize(w.name) == normalizedKeyword));
+    return exact ??
+        _uniqueOrNull(wallets.where((w) {
+          final normalizedName = _normalize(w.name);
+          return normalizedName.contains(normalizedKeyword) || normalizedKeyword.contains(normalizedName);
+        }));
+  }
+
+  /// Resolves a receipt to a wallet, plus the reason the choice was made
+  /// (one of: `explicit_wallet`, `debit_fallback`, `credit_fallback`,
+  /// `generic_card_fallback`, `ewallet_fallback`, `others_fallback`,
+  /// `preserve_current`, or `none`). Does NOT know about learned payment
+  /// aliases — the caller checks those first, since they outrank every tier
+  /// here.
+  static (Wallet?, String) match({
+    required String rawText,
+    required List<Wallet> wallets,
+    List<Transaction> transactions = const [],
+    Wallet? currentWallet,
+  }) {
+    if (wallets.isEmpty) return (null, 'none');
+
+    final clue = detectPaymentClue(rawText);
+    Wallet? result;
+    var reason = 'none';
+
+    if (clue.isCash) {
+      result = _uniqueOrNull(wallets.where((w) => _normalize(w.name).contains('cash')));
+      if (result != null) reason = 'explicit_wallet';
+    }
+
+    if (result == null && clue.specificBrand != null) {
+      result = _matchByExplicitName(_normalize(clue.specificBrand!), wallets);
+      if (result != null) reason = 'explicit_wallet';
+    }
+
+    if (result == null && clue.cardTypeHint == 'debit') {
+      result = WalletUsageStats.findMostUsedWallet(
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.debitCard});
+      if (result != null) reason = 'debit_fallback';
+    }
+
+    if (result == null && clue.cardTypeHint == 'credit') {
+      result = WalletUsageStats.findMostUsedWallet(
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.creditCard});
+      if (result != null) reason = 'credit_fallback';
+    }
+
+    if (result == null && clue.cardTypeHint == null && clue.hasGenericCard) {
+      result = WalletUsageStats.findMostUsedWallet(
+        wallets: wallets,
+        transactions: transactions,
+        allowedTypes: {WalletType.debitCard, WalletType.creditCard},
+      );
+      if (result != null) reason = 'generic_card_fallback';
+    }
+
+    if (result == null && clue.specificBrand == null && clue.hasGenericEwallet) {
+      result = WalletUsageStats.findMostUsedWallet(
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.eWallet});
+      if (result != null) reason = 'ewallet_fallback';
+    }
+
+    final hasAnyClue =
+        clue.isCash || clue.specificBrand != null || clue.cardTypeHint != null || clue.hasGenericCard || clue.hasGenericEwallet;
+    if (result == null && !hasAnyClue) {
+      result = WalletUsageStats.findMostUsedWallet(
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.others});
+      if (result != null) reason = 'others_fallback';
+    }
+
+    if (result == null && currentWallet != null) {
+      result = currentWallet;
+      reason = 'preserve_current';
+    }
+
+    if (kDebugMode) {
+      debugPrint('[ReceiptWalletMatcher] final selected wallet: ${result?.name} (reason: $reason)');
+    }
+
+    return (result, reason);
   }
 }

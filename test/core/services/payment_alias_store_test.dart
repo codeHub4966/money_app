@@ -61,4 +61,16 @@ void main() {
       expect(await PaymentAliasStore.lookup('last4:5678'), 'wallet-cimb');
     });
   });
+
+  group('PaymentAliasStore.clearAll', () {
+    test('removes every learned mapping, e.g. as part of Delete All Data', () async {
+      await PaymentAliasStore.learn('last4:1234', 'wallet-maybank');
+      await PaymentAliasStore.learn('last4:5678', 'wallet-cimb');
+
+      await PaymentAliasStore.clearAll();
+
+      expect(await PaymentAliasStore.lookup('last4:1234'), isNull);
+      expect(await PaymentAliasStore.lookup('last4:5678'), isNull);
+    });
+  });
 }

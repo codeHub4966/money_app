@@ -82,4 +82,15 @@ class PaymentAliasStore {
 
     await _writeAll(map);
   }
+
+  /// Clears every learned fingerprint -> wallet mapping. Must be called
+  /// whenever the app's data is wiped (e.g. Settings' "Delete All Data") so
+  /// a stale mapping never points at a wallet id that no longer exists.
+  static Future<void> clearAll() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefsKey);
+    if (kDebugMode) {
+      debugPrint('[PaymentAliasStore] cleared all learned aliases');
+    }
+  }
 }

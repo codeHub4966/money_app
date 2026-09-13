@@ -13,6 +13,7 @@ import '../../../data/repositories/wallet_repository.dart';
 import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../core/services/notification_service.dart';
+import '../../../core/services/payment_alias_store.dart';
 import '../../providers/insight_notification_provider.dart';
 import '../settings/pin_screen.dart';
 import '../../providers/app_providers.dart';
@@ -603,6 +604,10 @@ class _State extends ConsumerState<SettingsScreen> {
 
       ref.read(walletOrderProvider.notifier).saveOrder([]);
       await clearInsightNotificationState();
+      // Learned payment aliases point at wallet ids that no longer exist
+      // once all data is wiped — clear them too, or a future receipt could
+      // confidently "learn" its way to a deleted wallet.
+      await PaymentAliasStore.clearAll();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

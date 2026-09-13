@@ -396,21 +396,36 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       );
 
       final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+      final currentWallet = wallets.where((w) => w.id == _account).firstOrNull;
 
       // Learned card/payment alias (e.g. "VISA ****1234" -> a specific
-      // previously-confirmed wallet) takes priority over generic keyword
-      // matching, since it's evidence from the user's own confirmed choice.
+      // previously-confirmed wallet) takes priority over every rule-based
+      // match below, since it's evidence from the user's own confirmed
+      // choice rather than a guess.
       final fingerprint = PaymentAliasStore.extractFingerprint(receiptData.rawText);
       Wallet? matchedWallet;
       String? learnedAliasMatch;
+      String walletMatchReason = 'none';
       if (fingerprint != null) {
         final learnedWalletId = await PaymentAliasStore.lookup(fingerprint);
         if (learnedWalletId != null) {
           matchedWallet = wallets.where((w) => w.id == learnedWalletId).firstOrNull;
-          learnedAliasMatch = matchedWallet?.name;
+          if (matchedWallet != null) {
+            learnedAliasMatch = matchedWallet.name;
+            walletMatchReason = 'learned_alias';
+          }
         }
       }
-      matchedWallet ??= ReceiptWalletMatcher.match(receiptData.detectedPaymentKeyword, wallets);
+      if (matchedWallet == null) {
+        final (ruleWallet, reason) = ReceiptWalletMatcher.match(
+          rawText: receiptData.rawText,
+          wallets: wallets,
+          transactions: transactions,
+          currentWallet: currentWallet,
+        );
+        matchedWallet = ruleWallet;
+        walletMatchReason = reason;
+      }
 
       if (kDebugMode) {
         debugPrint('========== RECEIPT OCR (local) ==========');
@@ -424,7 +439,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         debugPrint('Learned alias match:\n$learnedAliasMatch');
         debugPrint('Current categories:\n${existingLabels.join(', ')}');
         debugPrint('Suggested category:\n$suggestedCategory ($categoryConfidence)');
-        debugPrint('Matched wallet:\n${matchedWallet?.name}');
+        debugPrint('Matched wallet:\n${matchedWallet?.name} (reason: $walletMatchReason)');
         debugPrint('==========================================');
       }
 
@@ -490,7 +505,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
       if (kDebugMode) {
         debugPrint('[AddTransactionScreen] final category: ${enriched.category ?? suggestedCategory}');
-        debugPrint('[AddTransactionScreen] final wallet: ${(enriched.wallet ?? matchedWallet)?.name}');
+        debugPrint('[AddTransactionScreen] final wallet: ${(enriched.wallet ?? matchedWallet)?.name} (reason: $walletMatchReason)');
       }
 
       if (!enriched.usedAi) return;
