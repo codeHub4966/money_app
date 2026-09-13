@@ -72,6 +72,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       }),
       GoRoute(path: '/transfer', builder: (c, s) => const TransferFundsScreen()),
       GoRoute(
+        path: '/edit-transfer',
+        builder: (c, s) => TransferFundsScreen(transaction: s.extra as Transaction?),
+      ),
+      GoRoute(
         path: '/budget/:category',
         builder: (c, s) => BudgetDetailScreen(categoryName: s.pathParameters['category']),
       ),

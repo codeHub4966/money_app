@@ -17,6 +17,7 @@ class TransactionDetailsScreen extends ConsumerWidget {
     final live = transaction != null
         ? all.where((t) => t.id == transaction!.id).firstOrNull ?? transaction
         : transaction;
+    final isBalanceAdjustment = live?.category == 'Balance Adjustment';
     return Scaffold(
       backgroundColor: AppTheme.surface,
       body: SafeArea(
@@ -48,8 +49,23 @@ class TransactionDetailsScreen extends ConsumerWidget {
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
             _ActionBtn(
               icon: Icons.edit_outlined,
-              color: Colors.orange,
-              onTap: () => context.push('/edit-transaction', extra: live),
+              color: isBalanceAdjustment
+                  ? AppTheme.onSurfaceVariant.withOpacity(0.4)
+                  : Colors.orange,
+              onTap: () {
+                if (live == null) return;
+                if (isBalanceAdjustment) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                      content: Text(
+                          'Balance Adjustment entries cannot be edited. Delete it to reverse the adjustment.')));
+                  return;
+                }
+                if (live.category == 'Transfer') {
+                  context.push('/edit-transfer', extra: live);
+                } else {
+                  context.push('/edit-transaction', extra: live);
+                }
+              },
             ),
             const SizedBox(width: 32),
             _ActionBtn(

@@ -6,8 +6,56 @@ import '../../../domain/models/wallet.dart';
 import '../../../domain/models/transaction.dart';
 import '../../providers/app_providers.dart';
 
+/// A single wallet balance write to apply, computed as a net delta from the
+/// wallet's current stored balance so overlapping old/new wallets (e.g. the
+/// "from" and "to" sides swapped, or unchanged) are handled correctly.
+class TransferBalanceUpdate {
+  final String walletId;
+  final double balance;
+  const TransferBalanceUpdate(this.walletId, this.balance);
+}
+
+/// Computes the wallet balance write(s) needed to save a transfer of
+/// [newAmount] from [newFromWallet] to [newToWallet]. When editing an
+/// existing transfer, pass its original [oldAmount]/[oldFromWallet]/
+/// [oldToWallet] so that transfer's effect is reversed first.
+List<TransferBalanceUpdate> computeTransferBalanceUpdates({
+  required double? oldAmount,
+  required Wallet? oldFromWallet,
+  required Wallet? oldToWallet,
+  required Wallet newFromWallet,
+  required Wallet newToWallet,
+  required double newAmount,
+}) {
+  final deltas = <String, double>{};
+  void addDelta(String walletId, double delta) {
+    deltas[walletId] = (deltas[walletId] ?? 0) + delta;
+  }
+
+  if (oldAmount != null) {
+    if (oldFromWallet != null) addDelta(oldFromWallet.id, oldAmount);
+    if (oldToWallet != null) addDelta(oldToWallet.id, -oldAmount);
+  }
+  addDelta(newFromWallet.id, -newAmount);
+  addDelta(newToWallet.id, newAmount);
+
+  final wallets = <String, Wallet>{
+    if (oldFromWallet != null) oldFromWallet.id: oldFromWallet,
+    if (oldToWallet != null) oldToWallet.id: oldToWallet,
+    newFromWallet.id: newFromWallet,
+    newToWallet.id: newToWallet,
+  };
+
+  return deltas.entries
+      .map((e) => TransferBalanceUpdate(e.key, wallets[e.key]!.balance + e.value))
+      .toList();
+}
+
 class TransferFundsScreen extends ConsumerStatefulWidget {
-  const TransferFundsScreen({super.key});
+  /// Either side (_out or _in) of an existing transfer to edit. When null,
+  /// this screen creates a brand new transfer instead.
+  final Transaction? transaction;
+  const TransferFundsScreen({super.key, this.transaction});
 
   @override
   ConsumerState<TransferFundsScreen> createState() => _State();
@@ -20,6 +68,42 @@ class _State extends ConsumerState<TransferFundsScreen> {
   final _noteCtrl = TextEditingController();
   DateTime _date = DateTime.now();
   bool _showNumberPad = false;
+
+  // Populated only when editing an existing transfer.
+  String? _outId;
+  String? _inId;
+  double? _oldAmount;
+  String? _oldFromId;
+  String? _oldToId;
+
+  bool get _isEditing => widget.transaction != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.transaction;
+    if (t == null) return;
+
+    final allTx = ref.read(transactionsProvider).valueOrNull ?? [];
+    final isOut = t.id.endsWith('_out');
+    final pairedId = isOut
+        ? t.id.replaceAll('_out', '_in')
+        : t.id.replaceAll('_in', '_out');
+    final paired = allTx.where((tx) => tx.id == pairedId).firstOrNull;
+    final outTx = isOut ? t : paired;
+    final inTx = isOut ? paired : t;
+
+    _outId = outTx?.id;
+    _inId = inTx?.id;
+    _fromId = outTx?.accountId;
+    _toId = inTx?.accountId;
+    _oldFromId = outTx?.accountId;
+    _oldToId = inTx?.accountId;
+    _oldAmount = t.amount;
+    _amount = t.amount.toStringAsFixed(2);
+    _noteCtrl.text = outTx?.note ?? t.note ?? '';
+    _date = outTx?.date ?? t.date;
+  }
 
   void _onKey(String key) {
     setState(() {
@@ -144,33 +228,59 @@ class _State extends ConsumerState<TransferFundsScreen> {
     }
     final from = wallets.firstWhere((w) => w.id == _fromId);
     final to = wallets.firstWhere((w) => w.id == _toId);
-    if (from.balance < amount) {
+
+    final oldFromWallet = _oldFromId != null
+        ? wallets.where((w) => w.id == _oldFromId).firstOrNull
+        : null;
+    final oldToWallet = _oldToId != null
+        ? wallets.where((w) => w.id == _oldToId).firstOrNull
+        : null;
+
+    final updates = computeTransferBalanceUpdates(
+      oldAmount: _oldAmount,
+      oldFromWallet: oldFromWallet,
+      oldToWallet: oldToWallet,
+      newFromWallet: from,
+      newToWallet: to,
+      newAmount: amount,
+    );
+
+    final fromUpdate = updates.firstWhere((u) => u.walletId == from.id);
+    if (fromUpdate.balance < 0) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Insufficient balance.')));
       return;
     }
+
     final walletRepo = ref.read(walletRepositoryProvider);
     final txRepo = ref.read(transactionRepositoryProvider);
     final now = DateTime.now();
     final note = _noteCtrl.text;
-    await walletRepo.add(Wallet(id: from.id, name: from.name, type: from.type, balance: from.balance - amount, includeInTotal: from.includeInTotal));
-    await walletRepo.add(Wallet(id: to.id, name: to.name, type: to.type, balance: to.balance + amount, includeInTotal: to.includeInTotal));
+
+    for (final u in updates) {
+      await walletRepo.updateBalance(u.walletId, u.balance);
+    }
+
+    final outId = _outId ?? '${now.microsecondsSinceEpoch}_out';
+    final inId = _inId ?? '${now.microsecondsSinceEpoch}_in';
+    final date = _isEditing ? _date : now;
+
     await txRepo.add(Transaction(
-      id: '${now.microsecondsSinceEpoch}_out',
+      id: outId,
       type: TransactionType.expense,
       amount: amount,
       category: 'Transfer',
       accountId: from.id,
       note: note,
-      date: now,
+      date: date,
     ));
     await txRepo.add(Transaction(
-      id: '${now.microsecondsSinceEpoch}_in',
+      id: inId,
       type: TransactionType.income,
       amount: amount,
       category: 'Transfer',
       accountId: to.id,
       note: note,
-      date: now,
+      date: date,
     ));
     if (mounted) context.pop();
   }
@@ -205,8 +315,8 @@ class _State extends ConsumerState<TransferFundsScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
           child: Row(children: [
             IconButton(icon: const Icon(Icons.arrow_back_rounded, color: AppTheme.secondary), onPressed: () => context.pop()),
-            const Expanded(child: Text('Transfer Funds', textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppTheme.onSurface))),
+            Expanded(child: Text(_isEditing ? 'Edit Transfer' : 'Transfer Funds', textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppTheme.onSurface))),
             const Icon(Icons.history_rounded, color: AppTheme.onSurfaceVariant),
             const SizedBox(width: 12),
           ]),
@@ -303,8 +413,8 @@ class _State extends ConsumerState<TransferFundsScreen> {
               child: Container(height: 56, width: double.infinity,
                 decoration: BoxDecoration(color: AppTheme.primary, borderRadius: BorderRadius.circular(24),
                   boxShadow: [BoxShadow(color: AppTheme.primary.withValues(alpha: 0.3), blurRadius: 20, offset: const Offset(0, 8))]),
-                child: const Center(child: Text('Transfer',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)))),
+                child: Center(child: Text(_isEditing ? 'Save Changes' : 'Transfer',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 16)))),
             ),
           ),
       ])),

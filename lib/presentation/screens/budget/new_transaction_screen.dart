@@ -8,7 +8,7 @@ import '../../providers/app_providers.dart';
 
 const _categories = [
   {'id': 'food', 'icon': '🍲', 'label': 'Food'},
-  {'id': 'goods', 'icon': '🧻', 'label': 'Goods'},
+  {'id': 'goods', 'icon': '🧻', 'label': 'Groceries'},
   {'id': 'snacks', 'icon': '🍩', 'label': 'Snacks'},
   {'id': 'fruit', 'icon': '🍉', 'label': 'Fruit'},
   {'id': 'vegetables', 'icon': '🥬', 'label': 'Vegetables'},

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../providers/app_providers.dart';
+import '../../../core/utils/group_by_day.dart';
 import '../../../domain/models/transaction.dart' as tx;
 import '../../../domain/models/wallet.dart' as wl;
 import '../../widgets/settings_icon_button.dart';
@@ -254,65 +255,75 @@ class _RecentActivity extends StatelessWidget {
       }
     }
 
-    final recent = filteredTx.toList();
+    // Group by calendar day. filteredTx is already sorted newest-first
+    // (transactionsProvider queries ordered desc(date)), and Dart's Map
+    // preserves insertion order, so the resulting groups come out
+    // newest-first too.
+    final grouped = groupByDay(filteredTx, (t) => t.date);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text('Recent Activity', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: AppTheme.onSurface)),
         const SizedBox(height: 16),
-        if (recent.isEmpty)
+        if (grouped.isEmpty)
           const Center(child: Text('No transactions yet', style: TextStyle(color: AppTheme.onSurfaceVariant)))
         else
-          ...recent.map((t) => GestureDetector(
-            onTap: () => onTap(t),
-            child: Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
-              child: Row(children: [
-                Container(width: 48, height: 48,
-                  decoration: BoxDecoration(
-                    color: t.type == tx.TransactionType.income
-                        ? const Color(0xFFEFFFF4)
-                        : const Color(0xFFFFEDED),
-                    borderRadius: BorderRadius.circular(14)),
-                  child: Center(
-                    child: emojiMap.containsKey(t.category)
-                        ? Text(emojiMap[t.category]!, style: const TextStyle(fontSize: 22))
-                        : Icon(
-                            t.type == tx.TransactionType.income
-                                ? Icons.arrow_downward_rounded
-                                : Icons.arrow_upward_rounded,
-                            color: t.type == tx.TransactionType.income
-                                ? const Color(0xFF14B8A6)
-                                : AppTheme.error,
-                            size: 22,
-                          ),
-                  ),
-                ),
-                const SizedBox(width: 16),
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(t.category, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
-                  Text(t.category == 'Transfer' ? 'Transfer' : (t.category == 'Balance Adjustment' ? 'Balance Adjustment' : t.type.name), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
-                ]),
-                const Spacer(),
-                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  Text(
-                    t.category == 'Transfer'
-                        ? 'RM${t.amount.toStringAsFixed(2)}'
-                        : '${t.type == tx.TransactionType.income ? '+' : '-'}RM${t.amount.toStringAsFixed(2)}',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
-                      color: t.type == tx.TransactionType.income ? const Color(0xFF14B8A6) : AppTheme.error)),
-                  Text(
-                    '${t.date.day}/${t.date.month}/${t.date.year}',
-                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Color(0xFF9EA3B8))),
-                ]),
-              ]),
+          ...grouped.entries.expand((entry) => [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8, top: 4),
+              child: Text(formatDateHeader(entry.key),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppTheme.onSurfaceVariant)),
             ),
-          )),
+            ...entry.value.map(_buildRow),
+          ]),
       ]),
+    );
+  }
+
+  Widget _buildRow(tx.Transaction t) {
+    return GestureDetector(
+      onTap: () => onTap(t),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
+        child: Row(children: [
+          Container(width: 48, height: 48,
+            decoration: BoxDecoration(
+              color: t.type == tx.TransactionType.income
+                  ? const Color(0xFFEFFFF4)
+                  : const Color(0xFFFFEDED),
+              borderRadius: BorderRadius.circular(14)),
+            child: Center(
+              child: emojiMap.containsKey(t.category)
+                  ? Text(emojiMap[t.category]!, style: const TextStyle(fontSize: 22))
+                  : Icon(
+                      t.type == tx.TransactionType.income
+                          ? Icons.arrow_downward_rounded
+                          : Icons.arrow_upward_rounded,
+                      color: t.type == tx.TransactionType.income
+                          ? const Color(0xFF14B8A6)
+                          : AppTheme.error,
+                      size: 22,
+                    ),
+            ),
+          ),
+          const SizedBox(width: 16),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(t.category, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.onSurface)),
+            Text(t.category == 'Transfer' ? 'Transfer' : (t.category == 'Balance Adjustment' ? 'Balance Adjustment' : t.type.name), style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.onSurfaceVariant)),
+          ]),
+          const Spacer(),
+          Text(
+            t.category == 'Transfer'
+                ? 'RM${t.amount.toStringAsFixed(2)}'
+                : '${t.type == tx.TransactionType.income ? '+' : '-'}RM${t.amount.toStringAsFixed(2)}',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+              color: t.type == tx.TransactionType.income ? const Color(0xFF14B8A6) : AppTheme.error)),
+        ]),
+      ),
     );
   }
 }

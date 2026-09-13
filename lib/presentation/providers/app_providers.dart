@@ -70,7 +70,7 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
 
   static const _defaultExpense = [
     AppCategory(id: 'food', label: 'Food', emoji: '🍲'),
-    AppCategory(id: 'goods', label: 'Goods', emoji: '🧻'),
+    AppCategory(id: 'goods', label: 'Groceries', emoji: '🧻'),
     AppCategory(id: 'snacks', label: 'Snacks', emoji: '🍩'),
     AppCategory(id: 'fruit', label: 'Fruit', emoji: '🍉'),
     AppCategory(id: 'vegetables', label: 'Vegetab.', emoji: '🥬'),
@@ -109,14 +109,28 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
     if (raw == null) return;
     try {
       final data = jsonDecode(raw) as Map<String, dynamic>;
-      state = {
-        'expense': (data['expense'] as List)
-            .map((e) => AppCategory.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        'income': (data['income'] as List)
-            .map((e) => AppCategory.fromJson(e as Map<String, dynamic>))
-            .toList(),
-      };
+      var expense = (data['expense'] as List)
+          .map((e) => AppCategory.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final income = (data['income'] as List)
+          .map((e) => AppCategory.fromJson(e as Map<String, dynamic>))
+          .toList();
+
+      // One-time rename migration: installs that persisted categories
+      // before the "Goods" -> "Groceries" rename still have the old label
+      // saved under the same id — update it in place so it shows up
+      // correctly without losing the user's category order/customizations.
+      var migratedLabel = false;
+      expense = expense.map((c) {
+        if (c.id == 'goods' && c.label != 'Groceries') {
+          migratedLabel = true;
+          return AppCategory(id: c.id, label: 'Groceries', emoji: c.emoji);
+        }
+        return c;
+      }).toList();
+
+      state = {'expense': expense, 'income': income};
+      if (migratedLabel) await _persist();
     } catch (_) {}
   }
 

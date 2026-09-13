@@ -23,6 +23,15 @@ class AppDatabase extends _$AppDatabase {
         await m.addColumn(transactions, transactions.receiptImagePath);
       }
     },
+    beforeOpen: (details) async {
+      // One-time (idempotent) data rename: the "Goods" category was renamed
+      // to "Groceries", but existing rows stored the old label as plain
+      // text. Keep old data working against the new category list.
+      await (update(transactions)..where((t) => t.category.equals('Goods')))
+          .write(const TransactionsCompanion(category: Value('Groceries')));
+      await (update(budgets)..where((b) => b.categoryName.equals('Goods')))
+          .write(const BudgetsCompanion(categoryName: Value('Groceries')));
+    },
   );
 
   Future<void> deleteAllData() async {
