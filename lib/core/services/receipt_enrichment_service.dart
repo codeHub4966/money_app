@@ -35,6 +35,32 @@ class ReceiptEnrichmentResult {
 /// the Gemini result with the local result without ever discarding a
 /// high-confidence local field.
 class ReceiptEnrichmentService {
+  /// Decides which fields are unreliable enough locally that the Gemini
+  /// fallback should be consulted about them. Exposed as its own pure
+  /// function (rather than inlined in [enrich]) so the trigger decision can
+  /// be unit tested directly against fixture [ReceiptData]/wallet
+  /// combinations, without making a real network call.
+  static List<String> lowConfidenceFieldsFor({
+    required ReceiptData local,
+    required FieldConfidence localCategoryConfidence,
+    required Wallet? localWallet,
+  }) {
+    final fields = <String>[];
+    if (local.amountConfidence != FieldConfidence.high) fields.add('amount');
+    if (local.dateConfidence != FieldConfidence.high) fields.add('date');
+    if (local.merchantConfidence != FieldConfidence.high) fields.add('merchant');
+    if (localCategoryConfidence != FieldConfidence.high) fields.add('category');
+
+    // Wallet is a special case: only ask Gemini about it when the receipt
+    // actually contains a payment clue that the local parser couldn't map
+    // to one of the user's existing wallets. An unknown wallet with no
+    // clue at all is not a reason to call Gemini.
+    final walletUnresolved = local.detectedPaymentKeyword != null && localWallet == null;
+    if (walletUnresolved) fields.add('wallet');
+
+    return fields;
+  }
+
   static Future<ReceiptEnrichmentResult> enrich({
     required ReceiptData local,
     required String? localCategory,
@@ -43,18 +69,12 @@ class ReceiptEnrichmentService {
     required List<String> existingCategories,
     required List<Wallet> existingWallets,
   }) async {
-    final lowConfidenceFields = <String>[];
-    if (local.amountConfidence != FieldConfidence.high) lowConfidenceFields.add('amount');
-    if (local.dateConfidence != FieldConfidence.high) lowConfidenceFields.add('date');
-    if (local.merchantConfidence != FieldConfidence.high) lowConfidenceFields.add('merchant');
-    if (localCategoryConfidence != FieldConfidence.high) lowConfidenceFields.add('category');
-
-    // Wallet is a special case: only ask Gemini about it when the receipt
-    // actually contains a payment clue that the local parser couldn't map
-    // to one of the user's existing wallets. An unknown wallet with no
-    // clue at all is not a reason to call Gemini.
+    final lowConfidenceFields = lowConfidenceFieldsFor(
+      local: local,
+      localCategoryConfidence: localCategoryConfidence,
+      localWallet: localWallet,
+    );
     final walletUnresolved = local.detectedPaymentKeyword != null && localWallet == null;
-    if (walletUnresolved) lowConfidenceFields.add('wallet');
 
     final localResult = ReceiptEnrichmentResult(
       amount: local.amount,

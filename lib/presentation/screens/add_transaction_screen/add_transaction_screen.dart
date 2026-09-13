@@ -11,6 +11,7 @@ import '../../../domain/models/wallet.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../core/services/receipt_scanner_service.dart';
 import '../../../core/services/receipt_enrichment_service.dart';
+import '../../../core/services/receipt_wallet_matcher.dart';
 import '../../providers/app_providers.dart';
 
 // Fixed colour palette cycled per category index
@@ -19,6 +20,52 @@ const _kBgColors = [
   Color(0xFFEFFFF4), Color(0xFFFFFBEB), Color(0xFFF3F4F6), Color(0xFFECFEFF),
   Color(0xFFFEF9C3), Color(0xFFFFEDED), Color(0xFFE0F2FE), Color(0xFFF0FDF4),
 ];
+
+/// The signed effect a transaction of [type]/[amount] has on a wallet balance.
+double balanceEffect(TransactionType type, double amount) {
+  return type == TransactionType.income ? amount : -amount;
+}
+
+/// A single wallet balance write to apply.
+class WalletBalanceUpdate {
+  final String walletId;
+  final double balance;
+  const WalletBalanceUpdate(this.walletId, this.balance);
+}
+
+/// Computes the wallet balance write(s) needed when saving a transaction,
+/// reversing [oldTransaction]'s effect (from [oldWallet] if the wallet
+/// changed) before applying the new type/amount to [newWallet].
+List<WalletBalanceUpdate> computeWalletBalanceUpdates({
+  required Transaction? oldTransaction,
+  required Wallet? oldWallet,
+  required Wallet newWallet,
+  required TransactionType newType,
+  required double newAmount,
+}) {
+  if (oldTransaction == null) {
+    return [
+      WalletBalanceUpdate(
+          newWallet.id, newWallet.balance + balanceEffect(newType, newAmount)),
+    ];
+  }
+
+  if (oldTransaction.accountId == newWallet.id) {
+    final newBalance = newWallet.balance -
+        balanceEffect(oldTransaction.type, oldTransaction.amount) +
+        balanceEffect(newType, newAmount);
+    return [WalletBalanceUpdate(newWallet.id, newBalance)];
+  }
+
+  final updates = <WalletBalanceUpdate>[];
+  if (oldWallet != null) {
+    updates.add(WalletBalanceUpdate(oldWallet.id,
+        oldWallet.balance - balanceEffect(oldTransaction.type, oldTransaction.amount)));
+  }
+  updates.add(WalletBalanceUpdate(
+      newWallet.id, newWallet.balance + balanceEffect(newType, newAmount)));
+  return updates;
+}
 
 class AddTransactionScreen extends ConsumerStatefulWidget {
   final Transaction? transaction;
@@ -203,12 +250,20 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     final txRepo = ref.read(transactionRepositoryProvider);
     final walletRepo = ref.read(walletRepositoryProvider);
 
-    double newBalance = wallet.balance;
-    if (widget.transaction != null) {
-      final old = widget.transaction!;
-      newBalance += old.type == TransactionType.income ? -old.amount : old.amount;
+    final old = widget.transaction;
+    final oldWallet = (old != null && old.accountId != wallet.id)
+        ? wallets.where((w) => w.id == old.accountId).firstOrNull
+        : null;
+    final updates = computeWalletBalanceUpdates(
+      oldTransaction: old,
+      oldWallet: oldWallet,
+      newWallet: wallet,
+      newType: _type,
+      newAmount: amount,
+    );
+    for (final update in updates) {
+      await walletRepo.updateBalance(update.walletId, update.balance);
     }
-    newBalance += _type == TransactionType.income ? amount : -amount;
 
     final transactionId = widget.transaction?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
     String? savedReceiptPath;
@@ -228,10 +283,6 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       date: _date,
       receiptImagePath: savedReceiptPath,
     ));
-
-    await walletRepo.add(Wallet(
-        id: wallet.id, name: wallet.name, type: wallet.type,
-        balance: newBalance, includeInTotal: wallet.includeInTotal));
 
     if (mounted) context.pop();
   }
@@ -324,7 +375,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       );
 
       final wallets = ref.read(walletsProvider).valueOrNull ?? [];
-      final matchedWallet = _matchWalletForPaymentKeyword(receiptData.detectedPaymentKeyword, wallets);
+      final matchedWallet = ReceiptWalletMatcher.match(receiptData.detectedPaymentKeyword, wallets);
 
       if (kDebugMode) {
         debugPrint('========== RECEIPT OCR (local) ==========');
@@ -465,36 +516,6 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       history.putIfAbsent(merchant, () => t.category);
     }
     return history;
-  }
-
-  static const _specificPaymentBrands = {
-    'touch n go', 'grabpay', 'boost', 'shopeepay', 'maybank', 'cimb',
-    'public bank', 'hong leong', 'rhb', 'ambank',
-  };
-  static const _genericCardKeywords = {'visa', 'mastercard', 'debit', 'credit'};
-
-  Wallet? _matchWalletForPaymentKeyword(String? keyword, List<Wallet> wallets) {
-    if (keyword == null || wallets.isEmpty) return null;
-
-    if (keyword == 'cash') {
-      return wallets
-          .where((w) => w.type == WalletType.cash || w.name.toLowerCase().contains('cash'))
-          .firstOrNull;
-    }
-
-    if (_specificPaymentBrands.contains(keyword)) {
-      final exact = wallets.where((w) => w.name.toLowerCase() == keyword).firstOrNull;
-      if (exact != null) return exact;
-      return wallets
-          .where((w) => w.name.toLowerCase().contains(keyword) || keyword.contains(w.name.toLowerCase()))
-          .firstOrNull;
-    }
-
-    if (_genericCardKeywords.contains(keyword)) {
-      return wallets.where((w) => w.type == WalletType.bank || w.type == WalletType.credit).firstOrNull;
-    }
-
-    return null;
   }
 
   @override
