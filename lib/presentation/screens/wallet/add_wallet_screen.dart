@@ -8,10 +8,10 @@ import '../../../domain/models/transaction.dart';
 import '../../providers/app_providers.dart';
 
 const _types = [
-  {'id': 'eWallet', 'icon': '📱', 'label': 'E-wallet'},
-  {'id': 'debitCard', 'icon': '🏧', 'label': 'Debit Card'},
-  {'id': 'creditCard', 'icon': '💳', 'label': 'Credit Card'},
+  {'id': 'eWallet', 'icon': '📱', 'label': 'E-Wallet'},
+  {'id': 'card', 'icon': '💳', 'label': 'Card'},
   {'id': 'bank', 'icon': '🏛️', 'label': 'Bank'},
+  {'id': 'cash', 'icon': '💵', 'label': 'Cash'},
   {'id': 'savings', 'icon': '🐷', 'label': 'Savings'},
   {'id': 'others', 'icon': '📁', 'label': 'Others'},
 ];

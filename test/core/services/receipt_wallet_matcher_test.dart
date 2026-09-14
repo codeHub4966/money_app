@@ -25,7 +25,7 @@ void main() {
       final wallets = [
         _wallet('1', 'Maybank', WalletType.bank),
         // Heavily used, so a generic-card fallback would otherwise pick this.
-        _wallet('2', 'My Debit Card', WalletType.debitCard),
+        _wallet('2', 'My Debit Card', WalletType.card),
       ];
       final transactions = List.generate(10, (i) => _tx('2', DateTime(2026, 1, i + 1)));
 
@@ -78,85 +78,82 @@ void main() {
     });
   });
 
-  group('ReceiptWalletMatcher — explicit debit/credit qualifier -> most-used matching type', () {
+  group('ReceiptWalletMatcher — card clue (debit/credit qualifier or bare network) -> most-used card wallet', () {
     late List<Wallet> wallets;
     setUp(() {
       wallets = [
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
-        _wallet('credit-1', 'My Credit Card', WalletType.creditCard),
+        _wallet('card-1', 'My Card A', WalletType.card),
+        _wallet('card-2', 'My Card B', WalletType.card),
       ];
     });
 
-    test('VISA DEBIT selects the most-used debit-card wallet', () {
-      final transactions = [_tx('debit-1', DateTime(2026, 1, 1))];
+    test('VISA DEBIT selects the most-used card wallet', () {
+      final transactions = [_tx('card-1', DateTime(2026, 1, 1))];
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'VISA DEBIT', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'debit-1');
-      expect(reason, 'debit_fallback');
+      expect(wallet?.id, 'card-1');
+      expect(reason, 'card_fallback');
     });
 
-    test('DEBIT CARD selects the most-used debit-card wallet', () {
-      final transactions = [_tx('debit-1', DateTime(2026, 1, 1))];
+    test('DEBIT CARD selects the most-used card wallet', () {
+      final transactions = [_tx('card-1', DateTime(2026, 1, 1))];
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'DEBIT CARD', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'debit-1');
-      expect(reason, 'debit_fallback');
+      expect(wallet?.id, 'card-1');
+      expect(reason, 'card_fallback');
     });
 
-    test('VISA CREDIT selects the most-used credit-card wallet', () {
-      final transactions = [_tx('credit-1', DateTime(2026, 1, 1))];
+    test('VISA CREDIT selects the most-used card wallet', () {
+      final transactions = [_tx('card-2', DateTime(2026, 1, 1))];
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'VISA CREDIT', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'credit-1');
-      expect(reason, 'credit_fallback');
+      expect(wallet?.id, 'card-2');
+      expect(reason, 'card_fallback');
     });
 
-    test('CREDIT CARD selects the most-used credit-card wallet', () {
-      final transactions = [_tx('credit-1', DateTime(2026, 1, 1))];
+    test('CREDIT CARD selects the most-used card wallet', () {
+      final transactions = [_tx('card-2', DateTime(2026, 1, 1))];
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'CREDIT CARD', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'credit-1');
-      expect(reason, 'credit_fallback');
+      expect(wallet?.id, 'card-2');
+      expect(reason, 'card_fallback');
     });
-  });
 
-  group('ReceiptWalletMatcher — bare card network (no debit/credit qualifier)', () {
-    test('VISA alone searches both debit and credit wallets and picks the most-used', () {
-      final wallets = [
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
-        _wallet('credit-1', 'My Credit Card', WalletType.creditCard),
-      ];
-      final transactions = List.generate(5, (i) => _tx('credit-1', DateTime(2026, 1, i + 1)));
+    test('VISA alone (no debit/credit qualifier) also picks the most-used card wallet', () {
+      final transactions = List.generate(5, (i) => _tx('card-2', DateTime(2026, 1, i + 1)));
 
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'VISA', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'credit-1');
-      expect(reason, 'generic_card_fallback');
+      expect(wallet?.id, 'card-2');
+      expect(reason, 'card_fallback');
     });
 
-    test('MASTERCARD alone searches both debit and credit wallets and picks the most-used', () {
-      final wallets = [
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
-        _wallet('credit-1', 'My Credit Card', WalletType.creditCard),
-      ];
-      final transactions = List.generate(5, (i) => _tx('debit-1', DateTime(2026, 1, i + 1)));
+    test('MASTERCARD alone also picks the most-used card wallet', () {
+      final transactions = List.generate(5, (i) => _tx('card-1', DateTime(2026, 1, i + 1)));
 
       final (wallet, reason) =
           ReceiptWalletMatcher.match(rawText: 'MASTERCARD', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'debit-1');
-      expect(reason, 'generic_card_fallback');
+      expect(wallet?.id, 'card-1');
+      expect(reason, 'card_fallback');
     });
+  });
 
-    test('does not assume VISA always means debit or always means credit', () {
+  group('ReceiptWalletMatcher — cash clue with no matching wallet name -> most-used cash wallet', () {
+    test('a cash keyword with no uniquely-named "cash" wallet falls back to the most-used cash-type wallet', () {
       final wallets = [
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
-        _wallet('credit-1', 'My Credit Card', WalletType.creditCard),
+        _wallet('cash-1', 'Petty Cash Box', WalletType.cash),
+        _wallet('cash-2', 'Wallet Cash', WalletType.cash),
+        _wallet('bank-1', 'Maybank', WalletType.bank),
       ];
-      // Debit-card wallet is the most used here -> a bare "VISA" should
-      // follow usage, not a hardcoded assumption about what VISA implies.
-      final transactions = List.generate(3, (i) => _tx('debit-1', DateTime(2026, 1, i + 1)));
-      final (wallet, _) = ReceiptWalletMatcher.match(rawText: 'VISA', wallets: wallets, transactions: transactions);
-      expect(wallet?.id, 'debit-1');
+      final transactions = List.generate(3, (i) => _tx('cash-1', DateTime(2026, 1, i + 1)));
+
+      final (wallet, reason) = ReceiptWalletMatcher.match(
+        rawText: 'STORE ABC\nCASH\nTOTAL 10.00\n',
+        wallets: wallets,
+        transactions: transactions,
+      );
+      expect(wallet?.id, 'cash-1');
+      expect(reason, 'cash_fallback');
     });
   });
 
@@ -225,7 +222,7 @@ void main() {
     test('preserves the currently-selected wallet when no "others" wallet exists at all', () {
       final wallets = [
         _wallet('bank-1', 'Maybank', WalletType.bank),
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
+        _wallet('debit-1', 'My Debit Card', WalletType.card),
       ];
       final current = wallets.first;
 
@@ -249,8 +246,8 @@ void main() {
   group('WalletUsageStats via ReceiptWalletMatcher — usage-count tie-breaking', () {
     test('a tie in usage count is broken by whichever wallet was most recently used', () {
       final wallets = [
-        _wallet('debit-1', 'Card A', WalletType.debitCard),
-        _wallet('debit-2', 'Card B', WalletType.debitCard),
+        _wallet('debit-1', 'Card A', WalletType.card),
+        _wallet('debit-2', 'Card B', WalletType.card),
       ];
       final transactions = [
         _tx('debit-1', DateTime(2026, 1, 1)),
@@ -271,10 +268,10 @@ void main() {
     test('a learned card fingerprint wins over what the rule-based matcher would otherwise pick', () async {
       final wallets = [
         _wallet('maybank-1', 'Maybank', WalletType.bank),
-        _wallet('debit-1', 'My Debit Card', WalletType.debitCard),
+        _wallet('debit-1', 'My Debit Card', WalletType.card),
       ];
-      // Heavily used, so the generic-card fallback would otherwise pick this
-      // instead of Maybank.
+      // Heavily used, so the card fallback would otherwise pick this instead
+      // of Maybank.
       final transactions = List.generate(10, (i) => _tx('debit-1', DateTime(2026, 1, i + 1)));
 
       // The user previously confirmed "VISA ****1234" belongs to Maybank.
@@ -288,12 +285,12 @@ void main() {
       expect(learnedWalletId, 'maybank-1');
 
       // The rule-based matcher alone (ignoring the alias) would pick the
-      // heavily-used generic-card fallback wallet instead of Maybank —
-      // demonstrating why the alias must be checked first by the caller.
+      // heavily-used card fallback wallet instead of Maybank — demonstrating
+      // why the alias must be checked first by the caller.
       final (ruleOnlyWallet, ruleOnlyReason) =
           ReceiptWalletMatcher.match(rawText: rawText, wallets: wallets, transactions: transactions);
       expect(ruleOnlyWallet?.id, 'debit-1');
-      expect(ruleOnlyReason, 'generic_card_fallback');
+      expect(ruleOnlyReason, 'card_fallback');
 
       final resolvedWallet = wallets.where((w) => w.id == learnedWalletId).first;
       expect(resolvedWallet.name, 'Maybank');

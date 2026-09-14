@@ -10,9 +10,14 @@ const Set<String> _excludedCategories = {'Transfer', 'Balance Adjustment'};
 /// [year]/[month]: an expense, dated in that month, and not a Transfer or
 /// Balance Adjustment entry.
 bool isAnomalyEligibleExpense(tx.Transaction t, int year, int month) =>
+    isEligibleExpense(t) && t.date.year == year && t.date.month == month;
+
+/// Whether [t] should count towards spending totals at all: an expense, not
+/// a Transfer or Balance Adjustment entry, regardless of month. Used by
+/// detectors that scan across multiple months (see
+/// `merchant_pattern_detector.dart`) rather than one specific month.
+bool isEligibleExpense(tx.Transaction t) =>
     t.type == tx.TransactionType.expense &&
-    t.date.year == year &&
-    t.date.month == month &&
     !_excludedCategories.contains(t.category);
 
 /// Q1/Q3/IQR and the resulting upper outlier threshold for a set of daily

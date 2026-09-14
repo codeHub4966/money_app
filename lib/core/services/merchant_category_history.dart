@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import '../../domain/models/transaction.dart';
+import '../utils/merchant_identity.dart' as merchant_identity;
 
 /// Per-merchant category counts accumulated from confirmed transactions.
 class MerchantCategoryStats {
@@ -32,17 +33,11 @@ class MerchantCategoryHistory {
   /// only whitespace is normalized — to avoid merging genuinely different
   /// merchant names that happen to share words.
   static String normalizeMerchant(String merchant) {
-    final normalized = merchant.toLowerCase().trim().replaceAll(RegExp(r'\s+'), ' ');
+    final normalized = merchant_identity.normalizeMerchant(merchant);
     if (kDebugMode) {
       debugPrint('[MerchantCategoryHistory] normalize "$merchant" -> "$normalized"');
     }
     return normalized;
-  }
-
-  static String? _merchantFromNote(String? note) {
-    if (note == null || note.isEmpty) return null;
-    final merchant = note.split(' — ').first.trim();
-    return merchant.isEmpty ? null : merchant;
   }
 
   /// Aggregates every confirmed transaction's (merchant, category) pair.
@@ -53,7 +48,7 @@ class MerchantCategoryHistory {
   static Map<String, MerchantCategoryStats> build(List<Transaction> transactions) {
     final counts = <String, Map<String, int>>{};
     for (final t in transactions) {
-      final merchant = _merchantFromNote(t.note);
+      final merchant = merchant_identity.extractMerchant(t.note);
       if (merchant == null) continue;
       final key = normalizeMerchant(merchant);
       final catCounts = counts.putIfAbsent(key, () => {});

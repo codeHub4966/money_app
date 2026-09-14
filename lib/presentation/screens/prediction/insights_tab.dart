@@ -2,9 +2,15 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/utils/budget_risk_detector.dart';
 import '../../../core/utils/category_change.dart';
+import '../../../core/utils/category_overspending_detector.dart';
+import '../../../core/utils/merchant_pattern_detector.dart';
+import '../../../core/utils/saving_opportunity_detector.dart';
 import '../../../core/utils/spending_anomaly.dart';
+import '../../../core/utils/spending_forecast_calculator.dart';
 import '../../../domain/models/app_category.dart';
+import '../../../domain/models/budget.dart' as bg;
 import '../../../domain/models/transaction.dart' as tx;
 import '../../providers/app_providers.dart';
 import 'prediction_shared.dart';
@@ -64,8 +70,9 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
     final transactions =
         ref.watch(transactionsProvider).valueOrNull ?? <tx.Transaction>[];
     final allCats = ref.watch(categoriesProvider);
+    final budgets = ref.watch(budgetsProvider).valueOrNull ?? <bg.Budget>[];
 
-    final data = _MonthData.compute(transactions, widget.month);
+    final data = _MonthData.compute(transactions, widget.month, budgets);
     if (data.spent <= 0) return _buildEmptyState();
 
     final bars = _trendView == 'daily' ? data.dailyBars() : data.weeklyBars();
@@ -186,7 +193,10 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
                 fontWeight: FontWeight.w500,
                 color: Colors.white.withOpacity(0.82))),
         const SizedBox(height: 6),
-        Text('Based on your spending trend so far this month.',
+        Text(
+            fc.limitedData
+                ? 'Limited data — 5 spending days recommended.'
+                : 'Based on your spending trend so far this month.',
             style:
                 TextStyle(fontSize: 9, color: Colors.white.withOpacity(0.55))),
         if (fc.momPct != null) ...[
@@ -943,13 +953,15 @@ class _Forecast {
   final double? momPct;
   final bool flat;
   final double chipLeftFrac;
+  final bool limitedData;
   const _Forecast(
       {required this.projected,
       required this.cumulative,
       this.prevMonthTotal,
       this.momPct,
       required this.flat,
-      required this.chipLeftFrac});
+      required this.chipLeftFrac,
+      required this.limitedData});
 }
 
 class _Spike {
@@ -1090,7 +1102,8 @@ class _MonthData {
         (t) => isAnomalyEligibleExpense(t, monthStart.year, monthStart.month));
   }
 
-  static _MonthData compute(List<tx.Transaction> all, DateTime month) {
+  static _MonthData compute(
+      List<tx.Transaction> all, DateTime month, List<bg.Budget> budgets) {
     final now = DateTime.now();
     final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
     final isCurrentMonth = month.year == now.year && month.month == now.month;
@@ -1101,11 +1114,7 @@ class _MonthData {
         .where((t) => isAnomalyEligibleExpense(t, month.year, month.month))
         .toList();
 
-    final dailyFull = List<double>.filled(daysInMonth, 0);
-    for (final t in monthTx) {
-      if (t.date.day >= 1 && t.date.day <= daysInMonth)
-        dailyFull[t.date.day - 1] += t.amount;
-    }
+    final dailyFull = computeDailyTotals(monthTx, daysInMonth);
     final recorded = dailyFull.sublist(0, daysElapsed);
     final spent = recorded.fold(0.0, (s, v) => s + v);
 
@@ -1125,10 +1134,11 @@ class _MonthData {
           smartInsights: const []);
     }
 
-    // Average is spend ÷ non-zero spending days so RM0 calendar days never
-    // drag it down (and, in turn, never inflate the "x your average" figure).
+    // Calendar-day average: total spent so far ÷ days elapsed this month.
+    final avgDay = computeAvgPerDay(spent, daysElapsed);
+    // Non-zero spending days (separate from avgDay's divisor) only used to
+    // gate the forecast card's "limited data" caption below.
     final nonZeroDays = recorded.where((v) => v > 0).length;
-    final avgDay = nonZeroDays > 0 ? spent / nonZeroDays : 0.0;
 
     var hiDay = 1;
     var hiV = 0.0;
@@ -1139,20 +1149,10 @@ class _MonthData {
       }
     }
 
-    double? pacePct, paceNow, paceBefore;
-    if (daysElapsed >= 8) {
-      final recent7 = recorded.sublist(daysElapsed - 7);
-      final earlier = recorded.sublist(0, daysElapsed - 7);
-      final pn = recent7.fold(0.0, (s, v) => s + v) / 7;
-      final pb = earlier.isEmpty
-          ? 0.0
-          : earlier.fold(0.0, (s, v) => s + v) / earlier.length;
-      if (pb > 0) {
-        paceNow = pn;
-        paceBefore = pb;
-        pacePct = (pn - pb) / pb * 100;
-      }
-    }
+    final pace = computeSevenDayPace(recorded, daysElapsed);
+    final pacePct = pace.pacePct;
+    final paceNow = pace.paceNow;
+    final paceBefore = pace.paceBefore;
 
     final prevMonthStart = DateTime(month.year, month.month - 1, 1);
     final prevAtSamePoint = _monthHasData(all, prevMonthStart)
@@ -1161,33 +1161,30 @@ class _MonthData {
     String? prevAvgDaySub;
     double? momPct;
     if (prevAtSamePoint != null && prevAtSamePoint > 0) {
-      final prevAvgDay = prevAtSamePoint / daysElapsed;
+      final prevAvgDay = computeAvgPerDay(prevAtSamePoint, daysElapsed);
       final diff = avgDay - prevAvgDay;
       prevAvgDaySub =
           '${diff >= 0 ? '+' : '−'}${rm(diff.abs(), 2)} vs the same point in ${kMonthNames[prevMonthStart.month - 1]}';
       momPct = (spent - prevAtSamePoint) / prevAtSamePoint * 100;
     }
 
-    // vs-last-month bar list: walk back up to 6 consecutive data-bearing months.
-    final momMonths = <_MomMonth>[];
+    // vs-last-month bar list: walk back up to 5 consecutive data-bearing past
+    // months (current month is prepended once its forecast, below, is known).
+    final pastMonths = <_MomMonth>[];
     var cursor = month;
-    var cursorFull = _monthTotalToDay(
-        all, month, daysInMonth); // == spent when past-completed
-    momMonths.add(_MomMonth(
-        month: month, recorded: spent, projectedExtra: 0, isCurrent: true));
     for (var i = 1; i < 6; i++) {
       cursor = DateTime(cursor.year, cursor.month - 1, 1);
       if (!_monthHasData(all, cursor)) break;
       final cDaysInMonth = DateTime(cursor.year, cursor.month + 1, 0).day;
-      cursorFull = _monthTotalToDay(all, cursor, cDaysInMonth);
-      momMonths.add(_MomMonth(
+      final cursorFull = _monthTotalToDay(all, cursor, cDaysInMonth);
+      pastMonths.add(_MomMonth(
           month: cursor,
           recorded: cursorFull,
           projectedExtra: 0,
           isCurrent: false));
     }
     final prevMonthFullTotal =
-        momMonths.length >= 2 ? momMonths[1].recorded : null;
+        pastMonths.isNotEmpty ? pastMonths.first.recorded : null;
 
     // Category totals + top category.
     final catTotals = <String, double>{};
@@ -1217,32 +1214,47 @@ class _MonthData {
 
     // Forecast (current month only).
     _Forecast? forecast;
-    if (isCurrentMonth && daysElapsed < daysInMonth) {
-      final paceWindow =
-          daysElapsed >= 7 ? recorded.sublist(daysElapsed - 7) : recorded;
-      final pace = paceWindow.fold(0.0, (s, v) => s + v) / paceWindow.length;
-      final projected = spent + pace * (daysInMonth - daysElapsed);
-      final cumulative = <double>[0];
-      var run = 0.0;
-      for (var i = 0; i < daysElapsed; i++) {
-        run += recorded[i];
-        cumulative.add(run);
-      }
-      double? fcMomPct;
-      var flat = false;
-      if (prevMonthFullTotal != null && prevMonthFullTotal > 0) {
-        fcMomPct = (projected - prevMonthFullTotal) / prevMonthFullTotal * 100;
-        flat = fcMomPct.abs() < 2;
-      }
-      forecast = _Forecast(
-        projected: projected,
-        cumulative: cumulative,
-        prevMonthTotal: prevMonthFullTotal,
-        momPct: fcMomPct,
-        flat: flat,
-        chipLeftFrac: (daysElapsed / daysInMonth).clamp(0.0, 0.7),
+    if (isCurrentMonth) {
+      final sharedForecast = computeMonthForecast(
+        recorded: recorded,
+        daysElapsed: daysElapsed,
+        daysInMonth: daysInMonth,
+        spent: spent,
       );
+      if (sharedForecast != null) {
+        double? fcMomPct;
+        var flat = false;
+        if (prevMonthFullTotal != null && prevMonthFullTotal > 0) {
+          fcMomPct = (sharedForecast.projected - prevMonthFullTotal) /
+              prevMonthFullTotal *
+              100;
+          flat = fcMomPct.abs() < 2;
+        }
+        forecast = _Forecast(
+          projected: sharedForecast.projected,
+          cumulative: sharedForecast.cumulative,
+          prevMonthTotal: prevMonthFullTotal,
+          momPct: fcMomPct,
+          flat: flat,
+          chipLeftFrac: (daysElapsed / daysInMonth).clamp(0.0, 0.7),
+          limitedData: nonZeroDays < kMinSpendingDaysForAnomalyDetection,
+        );
+      }
     }
+
+    // vs-last-month bar list: current month shows Recorded + Projected (the
+    // forecast's remaining-month projection layered on top of what's already
+    // been spent); past completed months are actual-only.
+    final currentProjectedExtra =
+        forecast != null ? max(0.0, forecast.projected - spent) : 0.0;
+    final momMonths = <_MomMonth>[
+      _MomMonth(
+          month: month,
+          recorded: spent,
+          projectedExtra: currentProjectedExtra,
+          isCurrent: true),
+      ...pastMonths,
+    ];
 
     // Smart insights.
     final insights = <_Insight>[];
@@ -1284,6 +1296,48 @@ class _MonthData {
             'Your leading spending category changed from ${categoryChange.previous} to ${categoryChange.current}.',
         rule:
             '${kMonthNames[prevMonthStart.month - 1].toUpperCase()} VS ${kMonthNames[month.month - 1].toUpperCase()}',
+      ));
+    }
+    // Budget risk: category budgets on pace to be exceeded before month end.
+    // Only meaningful for the month currently in progress.
+    final budgetRisks = isCurrentMonth
+        ? detectBudgetRisks(
+            budgets: budgets,
+            monthTx: monthTx,
+            month: month,
+            daysElapsed: daysElapsed,
+            daysInMonth: daysInMonth,
+          )
+        : const <BudgetRisk>[];
+    if (budgetRisks.isNotEmpty) {
+      final r = budgetRisks.first;
+      final dateSuffix = r.exceedDate != null
+          ? ', around ${_dowLabel(r.exceedDate!)} ${r.exceedDate!.day} ${kMonthNames[r.exceedDate!.month - 1]}'
+          : '';
+      insights.add(_Insight(
+        icon: Icons.warning_amber_rounded,
+        alert: true,
+        text:
+            '${r.category} may exceed its budget by ${rm(r.overageAmount)} this month$dateSuffix.',
+        rule: 'BUDGET ${rm(r.monthlyLimit)} · PROJECTED ${rm(r.projected)}',
+      ));
+    }
+    // Category overspending vs the same point last month, using the same
+    // eligible-expense/date-window rule as categoryChange above.
+    final categoryOverspends = detectCategoryOverspending(
+      currentMonthTx: monthTx,
+      previousMonthTx: prevMonthTx,
+      daysElapsed: daysElapsed,
+    );
+    if (categoryOverspends.isNotEmpty) {
+      final o = categoryOverspends.first;
+      insights.add(_Insight(
+        icon: Icons.trending_up_rounded,
+        alert: true,
+        text:
+            '${o.category} spending is ${o.pctIncrease.round()}% higher than this time last month.',
+        rule:
+            '${rm(o.currentAmount)} VS ${rm(o.previousAmount)} AT THE SAME POINT',
       ));
     }
     if (spikes.isNotEmpty) {
@@ -1329,6 +1383,51 @@ class _MonthData {
             'You spent ${rm(spent)} in ${kMonthNames[month.month - 1]}, ${rm(diff.abs())} ${diff > 0 ? 'more' : 'less'} than ${kMonthNames[prevMonthStart.month - 1]}.',
         rule:
             '${kMonthNames[month.month - 1].toUpperCase()} VS ${kMonthNames[prevMonthStart.month - 1].toUpperCase()}',
+      ));
+    }
+    // Merchant repeated/recurring spending patterns (merchant-identified
+    // only, category is never used to detect these).
+    final allEligibleTx = all.where(isEligibleExpense).toList();
+    final merchantPatterns = detectMerchantPatterns(
+      currentMonthTx: monthTx,
+      allEligibleTx: allEligibleTx,
+    );
+    for (final p in merchantPatterns) {
+      if (p.type == MerchantPatternType.repeated) {
+        insights.add(_Insight(
+          icon: Icons.storefront_rounded,
+          alert: false,
+          text:
+              'You spent ${rm(p.amount)} at ${p.merchant} across ${p.count} transactions this month.',
+          rule: '${p.count} TRANSACTIONS AT ${p.merchant.toUpperCase()}',
+        ));
+      } else {
+        insights.add(_Insight(
+          icon: Icons.autorenew_rounded,
+          alert: false,
+          text:
+              '${rm(p.amount)} to ${p.merchant} appears to be a monthly recurring payment.',
+          rule: '${p.count} CHARGES ~30 DAYS APART',
+        ));
+      }
+    }
+    // Saving opportunity: recent pace clearly lower than the earlier pace.
+    final savingOpportunity = isCurrentMonth
+        ? detectSavingOpportunity(
+            recorded: recorded,
+            daysElapsed: daysElapsed,
+            daysInMonth: daysInMonth,
+            spent: spent,
+          )
+        : null;
+    if (savingOpportunity != null) {
+      insights.add(_Insight(
+        icon: Icons.savings_rounded,
+        alert: false,
+        text:
+            'At your current pace, you could spend about ${rm(savingOpportunity.estimatedSavings)} less by month end.',
+        rule:
+            'PACE DOWN ${savingOpportunity.pacePct.abs().toStringAsFixed(0)}% VS EARLIER THIS MONTH',
       ));
     }
 

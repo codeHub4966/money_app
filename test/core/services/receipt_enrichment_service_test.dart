@@ -21,7 +21,7 @@ ReceiptData _receipt({
   );
 }
 
-final _cashWallet = const Wallet(id: '1', name: 'Cash', type: WalletType.others, balance: 0, includeInTotal: true);
+final _cashWallet = const Wallet(id: '1', name: 'Cash', type: WalletType.cash, balance: 0, includeInTotal: true);
 
 void main() {
   group('ReceiptEnrichmentService.lowConfidenceFieldsFor — AI-fallback trigger decisions', () {

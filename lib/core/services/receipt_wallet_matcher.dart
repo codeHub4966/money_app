@@ -10,10 +10,9 @@ import 'wallet_usage_stats.dart';
 ///     the caller checks a *learned payment alias* before this, since that's
 ///     evidence from the user's own confirmed choice and outranks everything
 ///     below.
-///  2. an explicit debit/credit qualifier ("DEBIT CARD", "VISA CREDIT", ...)
-///     -> the most-used wallet of that specific type;
-///  3. a bare card network with no qualifier ("VISA", "MASTERCARD", "CARD")
-///     -> the most-used wallet among debit + credit wallets;
+///  2. a cash clue with no matching wallet name -> the most-used cash wallet;
+///  3. a card clue, qualified or not ("DEBIT CARD", "VISA CREDIT", "VISA",
+///     "MASTERCARD", "CARD") -> the most-used card wallet;
 ///  4. a generic e-wallet clue ("E-WALLET", "QR PAYMENT", "DUITNOW QR", ...)
 ///     -> the most-used e-wallet;
 ///  5. no reliable clue at all -> the most-used "others" wallet;
@@ -157,11 +156,10 @@ class ReceiptWalletMatcher {
   }
 
   /// Resolves a receipt to a wallet, plus the reason the choice was made
-  /// (one of: `explicit_wallet`, `debit_fallback`, `credit_fallback`,
-  /// `generic_card_fallback`, `ewallet_fallback`, `others_fallback`,
-  /// `preserve_current`, or `none`). Does NOT know about learned payment
-  /// aliases — the caller checks those first, since they outrank every tier
-  /// here.
+  /// (one of: `explicit_wallet`, `cash_fallback`, `card_fallback`,
+  /// `ewallet_fallback`, `others_fallback`, `preserve_current`, or `none`).
+  /// Does NOT know about learned payment aliases — the caller checks those
+  /// first, since they outrank every tier here.
   static (Wallet?, String) match({
     required String rawText,
     required List<Wallet> wallets,
@@ -184,25 +182,16 @@ class ReceiptWalletMatcher {
       if (result != null) reason = 'explicit_wallet';
     }
 
-    if (result == null && clue.cardTypeHint == 'debit') {
+    if (result == null && clue.isCash) {
       result = WalletUsageStats.findMostUsedWallet(
-        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.debitCard});
-      if (result != null) reason = 'debit_fallback';
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.cash});
+      if (result != null) reason = 'cash_fallback';
     }
 
-    if (result == null && clue.cardTypeHint == 'credit') {
+    if (result == null && (clue.cardTypeHint != null || clue.hasGenericCard)) {
       result = WalletUsageStats.findMostUsedWallet(
-        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.creditCard});
-      if (result != null) reason = 'credit_fallback';
-    }
-
-    if (result == null && clue.cardTypeHint == null && clue.hasGenericCard) {
-      result = WalletUsageStats.findMostUsedWallet(
-        wallets: wallets,
-        transactions: transactions,
-        allowedTypes: {WalletType.debitCard, WalletType.creditCard},
-      );
-      if (result != null) reason = 'generic_card_fallback';
+        wallets: wallets, transactions: transactions, allowedTypes: {WalletType.card});
+      if (result != null) reason = 'card_fallback';
     }
 
     if (result == null && clue.specificBrand == null && clue.hasGenericEwallet) {

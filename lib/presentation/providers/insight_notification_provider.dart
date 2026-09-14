@@ -4,6 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/services/insight_notification_detector.dart';
 import '../../core/services/notification_service.dart';
+import '../../core/utils/budget_risk_detector.dart';
+import '../../core/utils/category_overspending_detector.dart';
+import '../../core/utils/merchant_pattern_detector.dart';
+import '../../domain/models/budget.dart' as bg;
 import '../../domain/models/transaction.dart' as tx;
 import 'app_providers.dart';
 
@@ -30,12 +34,19 @@ String _rm(num v) => 'RM${v.toStringAsFixed(0)}';
 // under this id replaces whatever summary was previously pending.
 const kNextDaySummaryNotificationId = 2;
 
-// How long after detecting a new unusual-spending day to silently deliver its
-// notification, instead of showing it the moment it's found.
+// Fixed, single-slot notification ID for the 6:00 PM merchant-pattern /
+// saving-opportunity digest — same idea as kNextDaySummaryNotificationId.
+const kSixPmDigestNotificationId = 3;
+
+// How long after detecting a new unusual-spending day (or budget risk /
+// significant category overspending) to silently deliver its notification,
+// instead of showing it the moment it's found.
 const kUnusualSpendingDelay = Duration(minutes: 3);
 
 const _kNextDaySummaryTargetKey = 'next_day_summary_target';
 const _kNextDaySummarySigKey = 'next_day_summary_sig';
+const _kSixPmDigestTargetKey = 'six_pm_digest_target';
+const _kSixPmDigestSigKey = 'six_pm_digest_sig';
 
 /// Watches [transactionsProvider] for the lifetime of the app and, whenever
 /// the app is unlocked, checks for new unusual-spending days and updated
@@ -55,14 +66,15 @@ const _kNextDaySummarySigKey = 'next_day_summary_sig';
 /// newer one and overwrite its result. The runner guarantees at most one run
 /// in flight and always resumes with the latest transaction list.
 final insightNotificationWatcherProvider = Provider<void>((ref) {
-  final runner =
-      LatestOnlySerialRunner<List<tx.Transaction>>(_checkForNewInsights);
+  final runner = LatestOnlySerialRunner<_InsightWatchInputs>(
+      (inputs) => _checkForNewInsights(inputs.transactions, inputs.budgets));
 
   void maybeCheck() {
     if (!ref.read(isAppUnlockedProvider)) return;
-    final list = ref.read(transactionsProvider).valueOrNull;
-    if (list == null) return;
-    runner.schedule(list);
+    final transactions = ref.read(transactionsProvider).valueOrNull;
+    final budgets = ref.read(budgetsProvider).valueOrNull;
+    if (transactions == null || budgets == null) return;
+    runner.schedule(_InsightWatchInputs(transactions, budgets));
   }
 
   ref.listen<AsyncValue<List<tx.Transaction>>>(transactionsProvider,
@@ -70,10 +82,22 @@ final insightNotificationWatcherProvider = Provider<void>((ref) {
     maybeCheck();
   }, fireImmediately: true);
 
+  // Budget risk depends on the budget list too, so an add/edit/delete there
+  // must also trigger an immediate recalculation, not just transaction edits.
+  ref.listen<AsyncValue<List<bg.Budget>>>(budgetsProvider, (previous, next) {
+    maybeCheck();
+  }, fireImmediately: true);
+
   ref.listen<bool>(isAppUnlockedProvider, (previous, next) {
     if (next) maybeCheck();
   }, fireImmediately: true);
 });
+
+class _InsightWatchInputs {
+  final List<tx.Transaction> transactions;
+  final List<bg.Budget> budgets;
+  const _InsightWatchInputs(this.transactions, this.budgets);
+}
 
 /// Runs [handler] for the most recently [schedule]d value, one at a time.
 ///
@@ -123,18 +147,31 @@ Future<void> clearInsightNotificationState() async {
   await prefs.remove(_kNextDaySummaryTargetKey);
   await prefs.remove(_kNextDaySummarySigKey);
 
-  final spikeKeys =
-      prefs.getKeys().where((k) => k.startsWith('notified_spikes_')).toList();
-  for (final key in spikeKeys) {
-    for (final sig in prefs.getStringList(key) ?? const <String>[]) {
-      await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
+  await notifications.cancelInsightNotification(kSixPmDigestNotificationId);
+  await prefs.remove(_kSixPmDigestTargetKey);
+  await prefs.remove(_kSixPmDigestSigKey);
+
+  const signaturePrefixes = [
+    'notified_spikes_',
+    'notified_budget_risk_',
+    'notified_overspend_',
+  ];
+  for (final prefix in signaturePrefixes) {
+    final keys = prefs.getKeys().where((k) => k.startsWith(prefix)).toList();
+    for (final key in keys) {
+      for (final sig in prefs.getStringList(key) ?? const <String>[]) {
+        await notifications
+            .cancelInsightNotification(sig.hashCode & 0x7fffffff);
+      }
+      await prefs.remove(key);
     }
-    await prefs.remove(key);
   }
 }
 
-Future<void> _checkForNewInsights(List<tx.Transaction> transactions) async {
-  final snapshot = computeCurrentMonthSnapshot(transactions, DateTime.now());
+Future<void> _checkForNewInsights(
+    List<tx.Transaction> transactions, List<bg.Budget> budgets) async {
+  final snapshot = computeCurrentMonthSnapshot(transactions, DateTime.now(),
+      budgets: budgets);
   if (snapshot == null) return;
 
   final notifications = NotificationService();
@@ -148,7 +185,14 @@ Future<void> _checkForNewInsights(List<tx.Transaction> transactions) async {
   final now = DateTime.now();
   final monthKey = '${now.year}-${now.month.toString().padLeft(2, '0')}';
 
+  // Tier A (~3 min delay): unusual spending, budget risk, significant
+  // category overspending.
   await _scheduleNewSpikes(notifications, prefs, monthKey, snapshot);
+  await _scheduleNewBudgetRisks(notifications, prefs, monthKey, snapshot);
+  await _scheduleNewCategoryOverspend(notifications, prefs, monthKey, snapshot);
+  // Tier B (6:00 PM): merchant patterns, saving opportunity.
+  await _scheduleSixPmDigest(notifications, prefs, snapshot);
+  // Tier C (11:00 AM next day): forecast, pace, category change.
   await _scheduleNextDaySummary(notifications, prefs, snapshot);
 }
 
@@ -208,11 +252,25 @@ NewSpikesToSchedule computeNewSpikesToSchedule({
       notifications: toSchedule, updatedSignatures: seen);
 }
 
+/// Signatures that were previously scheduled but are no longer present in
+/// the latest recalculation — e.g. the transaction behind a spike/budget-risk
+/// /overspend signature was edited or deleted before its delayed
+/// notification fired. Callers cancel the pending notification for each of
+/// these and drop it from the persisted signature set, rather than let it
+/// fire with stale content.
+Set<String> staleSignaturesToCancel({
+  required Set<String> alreadyScheduled,
+  required Set<String> currentSignatures,
+}) =>
+    alreadyScheduled.difference(currentSignatures);
+
 // Unusual-spending alerts aren't shown the moment they're detected — they're
 // silently scheduled ~3 minutes later so the user isn't interrupted mid-entry.
 // Signatures are recorded as soon as a spike is scheduled (not when it later
 // fires) so re-running this on the next transaction change never re-schedules
-// the same day twice.
+// the same day twice. Any previously-scheduled day that's no longer flagged
+// (e.g. the spike's transaction was edited/deleted) has its pending
+// notification cancelled instead of being left to fire.
 Future<void> _scheduleNewSpikes(
   NotificationService notifications,
   SharedPreferences prefs,
@@ -221,6 +279,16 @@ Future<void> _scheduleNewSpikes(
 ) async {
   final key = 'notified_spikes_$monthKey';
   final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+
+  final currentSignatures = snapshot.spikes
+      .map((s) => s.date.toIso8601String().substring(0, 10))
+      .toSet();
+  final stale = staleSignaturesToCancel(
+      alreadyScheduled: seen, currentSignatures: currentSignatures);
+  for (final sig in stale) {
+    await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
+  }
+  seen.removeAll(stale);
 
   final result = computeNewSpikesToSchedule(
       snapshot: snapshot, alreadyScheduled: seen, now: DateTime.now());
@@ -233,7 +301,189 @@ Future<void> _scheduleNewSpikes(
     );
   }
 
-  if (result.notifications.isNotEmpty) {
+  if (result.notifications.isNotEmpty || stale.isNotEmpty) {
+    await prefs.setStringList(key, result.updatedSignatures.toList());
+  }
+}
+
+/// A single budget-risk notification to schedule (not show immediately).
+class BudgetRiskNotificationToSchedule {
+  final int id;
+  final String title;
+  final String body;
+  final DateTime scheduledDate;
+  final String signature;
+  const BudgetRiskNotificationToSchedule({
+    required this.id,
+    required this.title,
+    required this.body,
+    required this.scheduledDate,
+    required this.signature,
+  });
+}
+
+class NewBudgetRisksToSchedule {
+  final List<BudgetRiskNotificationToSchedule> notifications;
+  final Set<String> updatedSignatures;
+  const NewBudgetRisksToSchedule(
+      {required this.notifications, required this.updatedSignatures});
+}
+
+String _budgetRiskSignature(String category) => 'budget_risk:$category';
+
+/// Pure decision logic for the budget-risk tier (Tier A, ~3 min delay):
+/// mirrors [computeNewSpikesToSchedule] — keyed by category rather than by
+/// day, since a budget risk is a per-category-per-month concept.
+NewBudgetRisksToSchedule computeNewBudgetRisksToSchedule({
+  required List<BudgetRisk> risks,
+  required Set<String> alreadyScheduled,
+  required DateTime now,
+}) {
+  final seen = {...alreadyScheduled};
+  final toSchedule = <BudgetRiskNotificationToSchedule>[];
+
+  for (final r in risks) {
+    final sig = _budgetRiskSignature(r.category);
+    if (!seen.add(sig)) continue;
+    final dateSuffix = r.exceedDate != null
+        ? ', around ${_dowLabel(r.exceedDate!)} ${r.exceedDate!.day} ${_monthNames[r.exceedDate!.month - 1]}'
+        : '';
+    toSchedule.add(BudgetRiskNotificationToSchedule(
+      id: sig.hashCode & 0x7fffffff,
+      title: 'Budget risk',
+      body:
+          '${r.category} may exceed its budget by ${_rm(r.overageAmount)} this month$dateSuffix.',
+      scheduledDate: now.add(kUnusualSpendingDelay),
+      signature: sig,
+    ));
+  }
+
+  return NewBudgetRisksToSchedule(
+      notifications: toSchedule, updatedSignatures: seen);
+}
+
+Future<void> _scheduleNewBudgetRisks(
+  NotificationService notifications,
+  SharedPreferences prefs,
+  String monthKey,
+  SpendingSnapshot snapshot,
+) async {
+  final key = 'notified_budget_risk_$monthKey';
+  final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+
+  final currentSignatures = snapshot.budgetRisks
+      .map((r) => _budgetRiskSignature(r.category))
+      .toSet();
+  final stale = staleSignaturesToCancel(
+      alreadyScheduled: seen, currentSignatures: currentSignatures);
+  for (final sig in stale) {
+    await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
+  }
+  seen.removeAll(stale);
+
+  final result = computeNewBudgetRisksToSchedule(
+      risks: snapshot.budgetRisks, alreadyScheduled: seen, now: DateTime.now());
+  for (final n in result.notifications) {
+    await notifications.scheduleInsightNotification(
+      id: n.id,
+      title: n.title,
+      body: n.body,
+      scheduledDate: n.scheduledDate,
+    );
+  }
+
+  if (result.notifications.isNotEmpty || stale.isNotEmpty) {
+    await prefs.setStringList(key, result.updatedSignatures.toList());
+  }
+}
+
+/// A single category-overspending notification to schedule (not show
+/// immediately).
+class CategoryOverspendNotificationToSchedule {
+  final int id;
+  final String title;
+  final String body;
+  final DateTime scheduledDate;
+  final String signature;
+  const CategoryOverspendNotificationToSchedule({
+    required this.id,
+    required this.title,
+    required this.body,
+    required this.scheduledDate,
+    required this.signature,
+  });
+}
+
+class NewCategoryOverspendToSchedule {
+  final List<CategoryOverspendNotificationToSchedule> notifications;
+  final Set<String> updatedSignatures;
+  const NewCategoryOverspendToSchedule(
+      {required this.notifications, required this.updatedSignatures});
+}
+
+String _overspendSignature(String category) => 'overspend:$category';
+
+/// Pure decision logic for the significant-category-overspending tier
+/// (Tier A, ~3 min delay): mirrors [computeNewSpikesToSchedule], keyed by
+/// category.
+NewCategoryOverspendToSchedule computeNewCategoryOverspendToSchedule({
+  required List<CategoryOverspend> overspends,
+  required Set<String> alreadyScheduled,
+  required DateTime now,
+}) {
+  final seen = {...alreadyScheduled};
+  final toSchedule = <CategoryOverspendNotificationToSchedule>[];
+
+  for (final o in overspends) {
+    final sig = _overspendSignature(o.category);
+    if (!seen.add(sig)) continue;
+    toSchedule.add(CategoryOverspendNotificationToSchedule(
+      id: sig.hashCode & 0x7fffffff,
+      title: 'Category spending up',
+      body:
+          '${o.category} spending is ${o.pctIncrease.round()}% higher than this time last month.',
+      scheduledDate: now.add(kUnusualSpendingDelay),
+      signature: sig,
+    ));
+  }
+
+  return NewCategoryOverspendToSchedule(
+      notifications: toSchedule, updatedSignatures: seen);
+}
+
+Future<void> _scheduleNewCategoryOverspend(
+  NotificationService notifications,
+  SharedPreferences prefs,
+  String monthKey,
+  SpendingSnapshot snapshot,
+) async {
+  final key = 'notified_overspend_$monthKey';
+  final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+
+  final currentSignatures = snapshot.categoryOverspends
+      .map((o) => _overspendSignature(o.category))
+      .toSet();
+  final stale = staleSignaturesToCancel(
+      alreadyScheduled: seen, currentSignatures: currentSignatures);
+  for (final sig in stale) {
+    await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
+  }
+  seen.removeAll(stale);
+
+  final result = computeNewCategoryOverspendToSchedule(
+      overspends: snapshot.categoryOverspends,
+      alreadyScheduled: seen,
+      now: DateTime.now());
+  for (final n in result.notifications) {
+    await notifications.scheduleInsightNotification(
+      id: n.id,
+      title: n.title,
+      body: n.body,
+      scheduledDate: n.scheduledDate,
+    );
+  }
+
+  if (result.notifications.isNotEmpty || stale.isNotEmpty) {
     await prefs.setStringList(key, result.updatedSignatures.toList());
   }
 }
@@ -415,6 +665,160 @@ Future<void> _scheduleNextDaySummary(
       );
       await prefs.setString(_kNextDaySummaryTargetKey, update.targetSignature);
       await prefs.setString(_kNextDaySummarySigKey, update.contentSignature);
+      return;
+  }
+}
+
+/// The 6:00 PM merchant-pattern / saving-opportunity digest to (re)schedule,
+/// or `null` when nothing needs to change.
+class SixPmDigestUpdate {
+  final DateTime scheduledDate; // the next 6:00 PM occurrence after `now`.
+  final List<String> lines;
+  final String targetSignature;
+  final String contentSignature;
+  const SixPmDigestUpdate({
+    required this.scheduledDate,
+    required this.lines,
+    required this.targetSignature,
+    required this.contentSignature,
+  });
+}
+
+/// Builds one line per merchant pattern (repeated-this-month or recurring)
+/// plus one for a saving opportunity, in that order. Empty when nothing is
+/// eligible yet — or no longer eligible after a recalculation.
+List<String> buildSixPmDigestLines(SpendingSnapshot snapshot) {
+  final lines = <String>[];
+  for (final p in snapshot.merchantPatterns) {
+    if (p.type == MerchantPatternType.repeated) {
+      lines.add(
+          'You spent ${_rm(p.amount)} at ${p.merchant} across ${p.count} transactions this month.');
+    } else {
+      lines.add(
+          '${_rm(p.amount)} to ${p.merchant} appears to be a monthly recurring payment.');
+    }
+  }
+  if (snapshot.savingOpportunity != null) {
+    lines.add(
+        'At your current pace, you could spend about ${_rm(snapshot.savingOpportunity!.estimatedSavings)} less by month end.');
+  }
+  return lines;
+}
+
+/// The next 6:00 PM occurrence strictly after [now] — today's if [now] is
+/// still before 6 PM, otherwise tomorrow's.
+DateTime nextSixPm(DateTime now) {
+  final today6pm = DateTime(now.year, now.month, now.day, 18, 0);
+  return now.isBefore(today6pm)
+      ? today6pm
+      : DateTime(now.year, now.month, now.day + 1, 18, 0);
+}
+
+/// Pure decision logic for Tier B (6:00 PM digest): targets the next 6:00 PM
+/// occurrence and compares against [storedTargetSignature]/
+/// [storedContentSignature] to decide whether anything needs to change —
+/// mirrors [computeNextDaySummaryUpdate].
+SixPmDigestUpdate? compute6pmDigestUpdate({
+  required SpendingSnapshot snapshot,
+  required DateTime now,
+  String? storedTargetSignature,
+  String? storedContentSignature,
+}) {
+  final lines = buildSixPmDigestLines(snapshot);
+  if (lines.isEmpty) return null;
+
+  final target = nextSixPm(now);
+  final targetSignature = target.toIso8601String().substring(0, 16);
+  final contentSignature = lines.join('');
+  if (storedTargetSignature == targetSignature &&
+      storedContentSignature == contentSignature) {
+    return null;
+  }
+
+  return SixPmDigestUpdate(
+    scheduledDate: target,
+    lines: lines,
+    targetSignature: targetSignature,
+    contentSignature: contentSignature,
+  );
+}
+
+/// What [_scheduleSixPmDigest] should do about the pending digest
+/// notification, for a given recalculation — mirrors
+/// [NextDaySummaryAction]/[decideNextDaySummaryAction].
+enum SixPmDigestAction { none, clear, replace }
+
+class SixPmDigestDecision {
+  final SixPmDigestAction action;
+  final SixPmDigestUpdate? update;
+  const SixPmDigestDecision._(this.action, this.update);
+  const SixPmDigestDecision.none() : this._(SixPmDigestAction.none, null);
+  const SixPmDigestDecision.clear() : this._(SixPmDigestAction.clear, null);
+  SixPmDigestDecision.replace(SixPmDigestUpdate update)
+      : this._(SixPmDigestAction.replace, update);
+}
+
+SixPmDigestDecision decideSixPmDigestAction({
+  required SpendingSnapshot snapshot,
+  required DateTime now,
+  String? storedTargetSignature,
+  String? storedContentSignature,
+}) {
+  if (buildSixPmDigestLines(snapshot).isEmpty) {
+    final hadPending =
+        storedTargetSignature != null || storedContentSignature != null;
+    return hadPending
+        ? const SixPmDigestDecision.clear()
+        : const SixPmDigestDecision.none();
+  }
+
+  final update = compute6pmDigestUpdate(
+    snapshot: snapshot,
+    now: now,
+    storedTargetSignature: storedTargetSignature,
+    storedContentSignature: storedContentSignature,
+  );
+  return update == null
+      ? const SixPmDigestDecision.none()
+      : SixPmDigestDecision.replace(update);
+}
+
+// Combines whichever of {merchant patterns, saving opportunity} are
+// currently available into a single expandable notification, scheduled for
+// the next 6:00 PM. Same replace-in-place / cancel-when-no-longer-eligible
+// behavior as the next-day summary.
+Future<void> _scheduleSixPmDigest(
+  NotificationService notifications,
+  SharedPreferences prefs,
+  SpendingSnapshot snapshot,
+) async {
+  final decision = decideSixPmDigestAction(
+    snapshot: snapshot,
+    now: DateTime.now(),
+    storedTargetSignature: prefs.getString(_kSixPmDigestTargetKey),
+    storedContentSignature: prefs.getString(_kSixPmDigestSigKey),
+  );
+
+  switch (decision.action) {
+    case SixPmDigestAction.none:
+      return;
+    case SixPmDigestAction.clear:
+      await notifications.cancelInsightNotification(kSixPmDigestNotificationId);
+      await prefs.remove(_kSixPmDigestTargetKey);
+      await prefs.remove(_kSixPmDigestSigKey);
+      return;
+    case SixPmDigestAction.replace:
+      final update = decision.update!;
+      await notifications.cancelInsightNotification(kSixPmDigestNotificationId);
+      await notifications.scheduleInsightNotification(
+        id: kSixPmDigestNotificationId,
+        title: 'Spending patterns',
+        body: update.lines.join('\n'),
+        scheduledDate: update.scheduledDate,
+        expandable: true,
+      );
+      await prefs.setString(_kSixPmDigestTargetKey, update.targetSignature);
+      await prefs.setString(_kSixPmDigestSigKey, update.contentSignature);
       return;
   }
 }

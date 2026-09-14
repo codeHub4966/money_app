@@ -1,13 +1,22 @@
+import '../../domain/models/budget.dart' as bg;
 import '../../domain/models/transaction.dart' as tx;
+import '../utils/budget_risk_detector.dart';
 import '../utils/category_change.dart';
+import '../utils/category_overspending_detector.dart';
+import '../utils/merchant_pattern_detector.dart';
+import '../utils/saving_opportunity_detector.dart';
 import '../utils/spending_anomaly.dart';
+import '../utils/spending_forecast_calculator.dart';
 
 // Lightweight, standalone re-derivation of "is this day unusual" / "what are
 // today's smart insights" for the CURRENT month, used only to decide when to
 // fire a local notification (insight_notification_provider.dart). Kept
 // separate from insights_tab.dart's private UI model so the Insights screen
-// itself never has to change shape for this to work. Unusual-day detection
-// itself is shared via spending_anomaly.dart so both stay consistent.
+// itself never has to change shape for this to work. Unusual-day detection,
+// avg/day, 7-day pace, month-end forecast, budget risk, category
+// overspending, merchant patterns, and saving opportunity are all shared via
+// the detector/calculator files under core/utils/ so both surfaces stay
+// consistent.
 
 class SpendingSpike {
   final DateTime date;
@@ -26,6 +35,10 @@ class SpendingSnapshot {
   final double? topCategoryPct;
   final double? forecastProjected;
   final CategoryChange? categoryChange;
+  final List<BudgetRisk> budgetRisks;
+  final List<CategoryOverspend> categoryOverspends;
+  final List<MerchantPattern> merchantPatterns;
+  final SavingOpportunity? savingOpportunity;
   const SpendingSnapshot({
     required this.avgDay,
     required this.daysElapsed,
@@ -35,6 +48,10 @@ class SpendingSnapshot {
     this.topCategoryPct,
     this.forecastProjected,
     this.categoryChange,
+    this.budgetRisks = const [],
+    this.categoryOverspends = const [],
+    this.merchantPatterns = const [],
+    this.savingOpportunity,
   });
 }
 
@@ -43,26 +60,21 @@ bool _isSpendableExpense(tx.Transaction t, DateTime month) =>
 
 /// Returns null when there's no recorded spending yet this month.
 SpendingSnapshot? computeCurrentMonthSnapshot(
-    List<tx.Transaction> all, DateTime now) {
+    List<tx.Transaction> all, DateTime now,
+    {List<bg.Budget> budgets = const []}) {
   final month = DateTime(now.year, now.month, 1);
   final daysInMonth = DateTime(month.year, month.month + 1, 0).day;
   final daysElapsed = now.day.clamp(1, daysInMonth);
 
   final monthTx = all.where((t) => _isSpendableExpense(t, month)).toList();
 
-  final dailyFull = List<double>.filled(daysInMonth, 0);
-  for (final t in monthTx) {
-    if (t.date.day >= 1 && t.date.day <= daysInMonth)
-      dailyFull[t.date.day - 1] += t.amount;
-  }
+  final dailyFull = computeDailyTotals(monthTx, daysInMonth);
   final recorded = dailyFull.sublist(0, daysElapsed);
   final spent = recorded.fold(0.0, (s, v) => s + v);
   if (spent <= 0) return null;
 
-  // Average is spend ÷ non-zero spending days so RM0 calendar days never
-  // drag it down (and, in turn, never inflate the "x your average" figure).
-  final nonZeroDays = recorded.where((v) => v > 0).length;
-  final avgDay = nonZeroDays > 0 ? spent / nonZeroDays : 0.0;
+  // Calendar-day average: total spent so far ÷ days elapsed this month.
+  final avgDay = computeAvgPerDay(spent, daysElapsed);
 
   // Unusual spending days: IQR rule shared with the Insights tab.
   final spikes = detectUnusualSpendingDays(
@@ -72,16 +84,8 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
       .toList();
 
   // 7-day pace vs earlier-in-month pace.
-  double? pacePct;
-  if (daysElapsed >= 8) {
-    final recent7 = recorded.sublist(daysElapsed - 7);
-    final earlier = recorded.sublist(0, daysElapsed - 7);
-    final pn = recent7.fold(0.0, (s, v) => s + v) / 7;
-    final pb = earlier.isEmpty
-        ? 0.0
-        : earlier.fold(0.0, (s, v) => s + v) / earlier.length;
-    if (pb > 0) pacePct = (pn - pb) / pb * 100;
-  }
+  final pace = computeSevenDayPace(recorded, daysElapsed);
+  final pacePct = pace.pacePct;
 
   // Top category so far this month.
   final catTotals = <String, double>{};
@@ -99,13 +103,13 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
   }
 
   // Month-end forecast, only while the month is still in progress.
-  double? forecastProjected;
-  if (daysElapsed < daysInMonth) {
-    final paceWindow =
-        daysElapsed >= 7 ? recorded.sublist(daysElapsed - 7) : recorded;
-    final pace = paceWindow.fold(0.0, (s, v) => s + v) / paceWindow.length;
-    forecastProjected = spent + pace * (daysInMonth - daysElapsed);
-  }
+  final forecast = computeMonthForecast(
+    recorded: recorded,
+    daysElapsed: daysElapsed,
+    daysInMonth: daysInMonth,
+    spent: spent,
+  );
+  final forecastProjected = forecast?.projected;
 
   // Leading category vs the same period last month.
   final prevMonth = DateTime(month.year, month.month - 1, 1);
@@ -117,6 +121,37 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
     daysElapsed: daysElapsed,
   );
 
+  // Budget risk: which category budgets are on pace to be exceeded.
+  final budgetRisks = detectBudgetRisks(
+    budgets: budgets,
+    monthTx: monthTx,
+    month: month,
+    daysElapsed: daysElapsed,
+    daysInMonth: daysInMonth,
+  );
+
+  // Category overspending vs the same period last month.
+  final categoryOverspends = detectCategoryOverspending(
+    currentMonthTx: monthTx,
+    previousMonthTx: prevMonthTx,
+    daysElapsed: daysElapsed,
+  );
+
+  // Merchant repeated/recurring spending patterns.
+  final allEligibleTx = all.where(isEligibleExpense).toList();
+  final merchantPatterns = detectMerchantPatterns(
+    currentMonthTx: monthTx,
+    allEligibleTx: allEligibleTx,
+  );
+
+  // Saving opportunity from a clearly-lower recent pace.
+  final savingOpportunity = detectSavingOpportunity(
+    recorded: recorded,
+    daysElapsed: daysElapsed,
+    daysInMonth: daysInMonth,
+    spent: spent,
+  );
+
   return SpendingSnapshot(
     avgDay: avgDay,
     daysElapsed: daysElapsed,
@@ -126,5 +161,9 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
     topCategoryPct: topCategoryPct,
     forecastProjected: forecastProjected,
     categoryChange: categoryChange,
+    budgetRisks: budgetRisks,
+    categoryOverspends: categoryOverspends,
+    merchantPatterns: merchantPatterns,
+    savingOpportunity: savingOpportunity,
   );
 }

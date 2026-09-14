@@ -186,9 +186,9 @@ class _PredictionDashboardScreenState extends ConsumerState<PredictionDashboardS
   static String _walletEmoji(wl.WalletType? type) {
     switch (type) {
       case wl.WalletType.eWallet: return '📱';
-      case wl.WalletType.debitCard: return '🏧';
-      case wl.WalletType.creditCard: return '💳';
+      case wl.WalletType.card: return '💳';
       case wl.WalletType.bank: return '🏦';
+      case wl.WalletType.cash: return '💵';
       case wl.WalletType.savings: return '🐷';
       case wl.WalletType.others: return '📂';
       default: return '👛';

@@ -15,8 +15,8 @@ class WalletAccountScreen extends ConsumerWidget {
   const WalletAccountScreen({super.key, required this.id, required this.name, required this.type, required this.balance, this.includeInTotal = true});
 
   static const _typeLabels = {
-    'eWallet': 'E-Wallet', 'debitCard': 'Debit Card', 'creditCard': 'Credit Card',
-    'bank': 'Bank Account', 'savings': 'Savings Account', 'others': 'Others',
+    'eWallet': 'E-Wallet', 'card': 'Card', 'bank': 'Bank Account',
+    'cash': 'Cash', 'savings': 'Savings Account', 'others': 'Others',
   };
 
   @override

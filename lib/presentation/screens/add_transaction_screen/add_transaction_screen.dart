@@ -940,13 +940,13 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
 
   String _walletEmoji(WalletType? type) {
     switch (type) {
-      case WalletType.eWallet:    return '📱';
-      case WalletType.debitCard:  return '🏧';
-      case WalletType.creditCard: return '💳';
-      case WalletType.bank:       return '🏦';
-      case WalletType.savings:    return '🐷';
-      case WalletType.others:     return '📂';
-      default:                 return '👛';
+      case WalletType.eWallet: return '📱';
+      case WalletType.card:    return '💳';
+      case WalletType.bank:    return '🏦';
+      case WalletType.cash:    return '💵';
+      case WalletType.savings: return '🐷';
+      case WalletType.others:  return '📂';
+      default:              return '👛';
     }
   }
 
@@ -1284,7 +1284,8 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             ]),
           ),
         ),
-        if (hasReceipt)
+        if (hasReceipt) ...[
+          const SizedBox(width: 12),
           GestureDetector(
             onTap: isBusy ? null : _rescanWithAi,
             child: Container(
@@ -1316,6 +1317,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
             ),
           ),
         ],
+      ],
       ),
     );
   }

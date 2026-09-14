@@ -1,6 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:money_app_flutter/core/services/insight_notification_detector.dart';
+import 'package:money_app_flutter/core/utils/budget_risk_detector.dart';
 import 'package:money_app_flutter/core/utils/category_change.dart';
+import 'package:money_app_flutter/core/utils/category_overspending_detector.dart';
+import 'package:money_app_flutter/core/utils/merchant_pattern_detector.dart';
+import 'package:money_app_flutter/core/utils/saving_opportunity_detector.dart';
 import 'package:money_app_flutter/presentation/providers/insight_notification_provider.dart';
 
 Future<void> _pumpEventLoop() => Future<void>.delayed(Duration.zero);
@@ -12,6 +16,10 @@ SpendingSnapshot _snapshot({
   double? pacePct,
   double? forecastProjected,
   CategoryChange? categoryChange,
+  List<BudgetRisk> budgetRisks = const [],
+  List<CategoryOverspend> categoryOverspends = const [],
+  List<MerchantPattern> merchantPatterns = const [],
+  SavingOpportunity? savingOpportunity,
 }) {
   return SpendingSnapshot(
     avgDay: avgDay,
@@ -20,6 +28,10 @@ SpendingSnapshot _snapshot({
     pacePct: pacePct,
     forecastProjected: forecastProjected,
     categoryChange: categoryChange,
+    budgetRisks: budgetRisks,
+    categoryOverspends: categoryOverspends,
+    merchantPatterns: merchantPatterns,
+    savingOpportunity: savingOpportunity,
   );
 }
 
@@ -63,12 +75,12 @@ void main() {
     });
 
     test(
-        'the multiplier in the body text is computed from the RM0-excluded avgDay',
+        'the multiplier in the body text is computed from the snapshot avgDay',
         () {
-      // avgDay here is assumed already computed as spent/non-zero-days (as
+      // avgDay here is assumed already computed as spent/days-elapsed (as
       // computeCurrentMonthSnapshot does) — this only checks that the
       // multiplier passes that value through untouched rather than
-      // re-deriving it from elapsed calendar days.
+      // re-deriving it itself.
       final result = computeNewSpikesToSchedule(
         snapshot: _snapshot(avgDay: 80, spikes: [spike]),
         alreadyScheduled: const {},
@@ -89,6 +101,207 @@ void main() {
 
       expect(result.notifications, isEmpty);
       expect(result.updatedSignatures, {'2026-03-06'});
+    });
+  });
+
+  group('staleSignaturesToCancel (cancel stale pending notifications)', () {
+    test('returns signatures no longer present after a recalculation', () {
+      final stale = staleSignaturesToCancel(
+        alreadyScheduled: {'2026-03-06', '2026-03-08'},
+        currentSignatures: {'2026-03-08'},
+      );
+      expect(stale, {'2026-03-06'});
+    });
+
+    test('empty when every previously-scheduled signature is still current',
+        () {
+      final stale = staleSignaturesToCancel(
+        alreadyScheduled: {'2026-03-06'},
+        currentSignatures: {'2026-03-06', '2026-03-08'},
+      );
+      expect(stale, isEmpty);
+    });
+  });
+
+  group('computeNewBudgetRisksToSchedule (Tier A: ~3 min delay)', () {
+    final now = DateTime(2026, 3, 10, 9, 0);
+    const risk = BudgetRisk(
+      category: 'Food',
+      monthlyLimit: 300,
+      spent: 200,
+      projected: 620,
+      overageAmount: 320,
+    );
+
+    test('schedules a new budget risk exactly kUnusualSpendingDelay after now',
+        () {
+      final result = computeNewBudgetRisksToSchedule(
+        risks: [risk],
+        alreadyScheduled: const {},
+        now: now,
+      );
+
+      expect(result.notifications, hasLength(1));
+      expect(result.notifications.single.scheduledDate,
+          now.add(kUnusualSpendingDelay));
+      expect(result.notifications.single.body, contains('Food'));
+      expect(result.notifications.single.body, contains('RM320'));
+      expect(result.updatedSignatures, {'budget_risk:Food'});
+    });
+
+    test('duplicate prevention: an already-scheduled category risk is not scheduled again',
+        () {
+      final result = computeNewBudgetRisksToSchedule(
+        risks: [risk],
+        alreadyScheduled: {'budget_risk:Food'},
+        now: now,
+      );
+      expect(result.notifications, isEmpty);
+    });
+  });
+
+  group('computeNewCategoryOverspendToSchedule (Tier A: ~3 min delay)', () {
+    final now = DateTime(2026, 3, 10, 9, 0);
+    const overspend = CategoryOverspend(
+      category: 'Shopping',
+      currentAmount: 145,
+      previousAmount: 100,
+      pctIncrease: 45,
+    );
+
+    test(
+        'schedules a new category overspend exactly kUnusualSpendingDelay after now',
+        () {
+      final result = computeNewCategoryOverspendToSchedule(
+        overspends: [overspend],
+        alreadyScheduled: const {},
+        now: now,
+      );
+
+      expect(result.notifications, hasLength(1));
+      expect(result.notifications.single.scheduledDate,
+          now.add(kUnusualSpendingDelay));
+      expect(result.notifications.single.body, contains('Shopping'));
+      expect(result.notifications.single.body, contains('45%'));
+      expect(result.updatedSignatures, {'overspend:Shopping'});
+    });
+
+    test(
+        'duplicate prevention: an already-scheduled category overspend is not scheduled again',
+        () {
+      final result = computeNewCategoryOverspendToSchedule(
+        overspends: [overspend],
+        alreadyScheduled: {'overspend:Shopping'},
+        now: now,
+      );
+      expect(result.notifications, isEmpty);
+    });
+  });
+
+  group('compute6pmDigestUpdate / decideSixPmDigestAction (Tier B: 6:00 PM)',
+      () {
+    test('targets today 6:00 PM when now is before 6 PM', () {
+      final now = DateTime(2026, 3, 10, 14, 0);
+      final update = compute6pmDigestUpdate(
+        snapshot: _snapshot(savingOpportunity:
+            const SavingOpportunity(estimatedSavings: 180, pacePct: -30)),
+        now: now,
+      );
+
+      expect(update, isNotNull);
+      expect(update!.scheduledDate, DateTime(2026, 3, 10, 18, 0));
+    });
+
+    test('targets tomorrow 6:00 PM when now is after 6 PM', () {
+      final now = DateTime(2026, 3, 10, 20, 0);
+      final update = compute6pmDigestUpdate(
+        snapshot: _snapshot(savingOpportunity:
+            const SavingOpportunity(estimatedSavings: 180, pacePct: -30)),
+        now: now,
+      );
+
+      expect(update, isNotNull);
+      expect(update!.scheduledDate, DateTime(2026, 3, 11, 18, 0));
+    });
+
+    test('includes merchant pattern and saving opportunity lines', () {
+      final now = DateTime(2026, 3, 10, 14, 0);
+      final update = compute6pmDigestUpdate(
+        snapshot: _snapshot(
+          merchantPatterns: [
+            MerchantPattern(
+              type: MerchantPatternType.repeated,
+              merchant: 'Starbucks',
+              amount: 90,
+              count: 4,
+              lastDate: DateTime(2026, 3, 9),
+            ),
+          ],
+          savingOpportunity:
+              const SavingOpportunity(estimatedSavings: 180, pacePct: -30),
+        ),
+        now: now,
+      );
+
+      expect(update, isNotNull);
+      expect(update!.lines, hasLength(2));
+      expect(update.lines[0], contains('Starbucks'));
+      expect(update.lines[1], contains('RM180'));
+    });
+
+    test('returns null when nothing is available yet', () {
+      final update =
+          compute6pmDigestUpdate(snapshot: _snapshot(), now: DateTime(2026, 3, 10, 14, 0));
+      expect(update, isNull);
+    });
+
+    test('duplicate prevention: unchanged content is not rescheduled', () {
+      final now = DateTime(2026, 3, 10, 14, 0);
+      final snapshot = _snapshot(
+          savingOpportunity:
+              const SavingOpportunity(estimatedSavings: 180, pacePct: -30));
+      final first = compute6pmDigestUpdate(snapshot: snapshot, now: now);
+      expect(first, isNotNull);
+
+      final second = compute6pmDigestUpdate(
+        snapshot: snapshot,
+        now: now,
+        storedTargetSignature: first!.targetSignature,
+        storedContentSignature: first.contentSignature,
+      );
+      expect(second, isNull);
+    });
+
+    test('decideSixPmDigestAction: clear when no longer eligible but was pending',
+        () {
+      final now = DateTime(2026, 3, 10, 14, 0);
+      final decision = decideSixPmDigestAction(
+        snapshot: _snapshot(),
+        now: now,
+        storedTargetSignature: '2026-03-10T18:00',
+        storedContentSignature: 'At your current pace...',
+      );
+      expect(decision.action, SixPmDigestAction.clear);
+    });
+
+    test('decideSixPmDigestAction: replace with new eligible content', () {
+      final now = DateTime(2026, 3, 10, 14, 0);
+      final decision = decideSixPmDigestAction(
+        snapshot: _snapshot(
+            savingOpportunity:
+                const SavingOpportunity(estimatedSavings: 180, pacePct: -30)),
+        now: now,
+      );
+      expect(decision.action, SixPmDigestAction.replace);
+    });
+
+    test('decideSixPmDigestAction: none when nothing eligible and nothing pending',
+        () {
+      final decision = decideSixPmDigestAction(
+        snapshot: _snapshot(),
+        now: DateTime(2026, 3, 10, 14, 0),
+      );
+      expect(decision.action, SixPmDigestAction.none);
     });
   });
 

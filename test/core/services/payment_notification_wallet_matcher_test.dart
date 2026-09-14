@@ -81,7 +81,7 @@ void main() {
     });
 
     test('a generic "Bank" sourceName does not falsely match an unrelated wallet', () {
-      final wallets = [_wallet('w1', 'Cash', WalletType.others)];
+      final wallets = [_wallet('w1', 'Cash', WalletType.cash)];
       final result = PaymentNotificationWalletMatcher.match(
         sourceApp: 'gmail',
         sourceName: 'Bank',

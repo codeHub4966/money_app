@@ -275,8 +275,23 @@ class _RecentActivity extends StatelessWidget {
               child: Text(formatDateHeader(entry.key),
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppTheme.onSurfaceVariant)),
             ),
-            ...entry.value.map(_buildRow),
+            _buildDayCard(entry.value),
           ]),
+      ]),
+    );
+  }
+
+  Widget _buildDayCard(List<tx.Transaction> dayTx) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
+      child: Column(children: [
+        for (var i = 0; i < dayTx.length; i++) ...[
+          _buildRow(dayTx[i]),
+          if (i != dayTx.length - 1)
+            const Divider(height: 1, thickness: 1, indent: 16, endIndent: 16, color: Color(0xFFF2F2F2)),
+        ],
       ]),
     );
   }
@@ -284,11 +299,8 @@ class _RecentActivity extends StatelessWidget {
   Widget _buildRow(tx.Transaction t) {
     return GestureDetector(
       onTap: () => onTap(t),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
         padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 8)]),
         child: Row(children: [
           Container(width: 48, height: 48,
             decoration: BoxDecoration(
