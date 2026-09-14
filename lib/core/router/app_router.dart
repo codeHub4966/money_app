@@ -33,7 +33,19 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/prediction', builder: (c, s) => const PredictionDashboardScreen()),
         ],
       ),
-      GoRoute(path: '/add-transaction', builder: (c, s) => const AddTransactionScreen()),
+      GoRoute(
+        path: '/add-transaction',
+        builder: (c, s) {
+          final extra = s.extra as Map<String, dynamic>?;
+          return AddTransactionScreen(
+            initialAmount: (extra?['amount'] as num?)?.toDouble(),
+            initialNote: extra?['note'] as String?,
+            initialCategory: extra?['category'] as String?,
+            initialAccountId: extra?['accountId'] as String?,
+            initialDate: extra?['date'] as DateTime?,
+          );
+        },
+      ),
       GoRoute(
         path: '/edit-transaction',
         builder: (c, s) => AddTransactionScreen(transaction: s.extra as Transaction?),

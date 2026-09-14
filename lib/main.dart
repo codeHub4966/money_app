@@ -1,17 +1,45 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/services/pin_service.dart';
 import 'core/services/notification_service.dart';
+import 'domain/models/detected_payment.dart';
 import 'presentation/providers/app_providers.dart';
 import 'presentation/providers/insight_notification_provider.dart';
+import 'presentation/providers/payment_notification_provider.dart';
 import 'presentation/screens/settings/pin_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService().initialize();
-  runApp(const ProviderScope(child: MoneyApp()));
+
+  // Created explicitly (rather than via ProviderScope) so
+  // NotificationService.onDetectedPaymentConfirmed can reach into Riverpod
+  // state from outside the widget tree when the user taps "Yes" on a
+  // detected-payment confirmation notification.
+  final container = ProviderContainer();
+  NotificationService().onDetectedPaymentConfirmed = (payment) {
+    container.read(pendingDetectedPaymentProvider.notifier).state = payment;
+  };
+
+  // Picks up a "Yes" tap that happened while the app process was fully
+  // terminated (persisted by notificationTapBackgroundHandler, which runs in
+  // an isolate with no Riverpod access) so it isn't lost.
+  final prefs = await SharedPreferences.getInstance();
+  final pendingPayload = prefs.getString(kPendingDetectedPaymentPrefsKey);
+  if (pendingPayload != null) {
+    await prefs.remove(kPendingDetectedPaymentPrefsKey);
+    try {
+      final payment = DetectedPayment.fromJson(jsonDecode(pendingPayload) as Map<String, dynamic>);
+      container.read(pendingDetectedPaymentProvider.notifier).state = payment;
+    } catch (_) {}
+  }
+
+  runApp(UncontrolledProviderScope(container: container, child: const MoneyApp()));
 }
 
 class MoneyApp extends ConsumerStatefulWidget {
@@ -183,7 +211,27 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
     }
 
     ref.watch(insightNotificationWatcherProvider);
+    ref.watch(paymentNotificationWatcherProvider);
     final router = ref.watch(appRouterProvider);
+
+    // Reachable only once the app is unlocked (the lock-screen branches above
+    // return early). Handles both a live "Yes" tap (fires via listen) and a
+    // payload that was already pending before this widget first built (e.g.
+    // a "Yes" tap while the app process was terminated, picked up in
+    // main()) — ref.listen alone wouldn't see that initial value.
+    void consumePendingPayment(DetectedPayment? payment) {
+      if (payment == null) return;
+      ref.read(pendingDetectedPaymentProvider.notifier).state = null;
+      router.push('/add-transaction', extra: payment.toPrefillMap());
+    }
+
+    ref.listen<DetectedPayment?>(pendingDetectedPaymentProvider, (previous, next) {
+      consumePendingPayment(next);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      consumePendingPayment(ref.read(pendingDetectedPaymentProvider));
+    });
+
     return MaterialApp.router(
       title: 'Money App',
       theme: AppTheme.light,

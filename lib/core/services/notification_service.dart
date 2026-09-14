@@ -1,8 +1,33 @@
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
+
+import '../../domain/models/detected_payment.dart';
+
+/// Key a detected-payment confirmation notification's tap ("Yes") payload is
+/// persisted under when the tap happens while the app process is fully
+/// terminated — `onDidReceiveBackgroundNotificationResponse` runs in an
+/// isolate with no widget tree/Riverpod container, so it can't navigate
+/// directly. Consumed once at the next app launch (see main.dart).
+const kPendingDetectedPaymentPrefsKey = 'pending_detected_payment';
+
+/// Runs in a background isolate (no plugin/Riverpod access) when a detected-
+/// payment notification action is tapped while the app process is dead.
+/// Persists the "Yes" tap so the next app launch can pick it up; "No" is a
+/// no-op (the notification just cancels).
+@pragma('vm:entry-point')
+void notificationTapBackgroundHandler(NotificationResponse response) {
+  if (response.actionId == 'no' || response.payload == null) return;
+  SharedPreferences.getInstance().then((prefs) {
+    prefs.setString(kPendingDetectedPaymentPrefsKey, response.payload!);
+  });
+}
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._();
@@ -15,6 +40,22 @@ class NotificationService {
   AndroidFlutterLocalNotificationsPlugin? get _androidPlugin =>
       _notificationsPlugin.resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>();
+
+  /// Set by the app's provider-wiring layer (see main.dart). Called when the
+  /// user taps "Yes" on a detected-payment confirmation notification while
+  /// the app process is alive (foreground or background). Never called for
+  /// "No" — that just lets the notification cancel.
+  void Function(DetectedPayment payment)? onDetectedPaymentConfirmed;
+
+  void _handleResponse(NotificationResponse response) {
+    if (response.actionId == 'no' || response.payload == null) return;
+    try {
+      final json = jsonDecode(response.payload!) as Map<String, dynamic>;
+      onDetectedPaymentConfirmed?.call(DetectedPayment.fromJson(json));
+    } catch (e) {
+      if (kDebugMode) debugPrint('[NotificationService] bad payload: $e');
+    }
+  }
 
   Future<void> initialize() async {
     tz.initializeTimeZones();
@@ -31,6 +72,8 @@ class NotificationService {
     );
     await _notificationsPlugin.initialize(
       const InitializationSettings(android: androidSettings, iOS: iosSettings),
+      onDidReceiveNotificationResponse: _handleResponse,
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackgroundHandler,
     );
   }
 
@@ -152,6 +195,35 @@ class NotificationService {
   // that hasn't fired yet.
   Future<void> cancelInsightNotification(int id) async {
     await _notificationsPlugin.cancel(id);
+  }
+
+  // Shows the "Did you spend/transfer...?" confirmation prompt for a
+  // [DetectedPayment] from the payment-notification-monitoring module, with
+  // Yes/No actions. Never saves anything itself — see
+  // [NotificationService.onDetectedPaymentConfirmed] /
+  // [notificationTapBackgroundHandler] for what happens on tap.
+  Future<void> showDetectedPaymentNotification(DetectedPayment payment) async {
+    const androidDetails = AndroidNotificationDetails(
+      'payment_detected',
+      'Payment Detected',
+      channelDescription:
+          'Prompts to confirm a payment or transfer detected from a notification',
+      importance: Importance.high,
+      priority: Priority.high,
+      actions: [
+        AndroidNotificationAction('yes', 'Yes'),
+        AndroidNotificationAction('no', 'No'),
+      ],
+    );
+
+    await _notificationsPlugin.show(
+      payment.notificationKey.hashCode & 0x7fffffff,
+      'Payment detected',
+      payment.confirmationBody,
+      const NotificationDetails(
+          android: androidDetails, iOS: DarwinNotificationDetails()),
+      payload: jsonEncode(payment.toJson()),
+    );
   }
 }
 

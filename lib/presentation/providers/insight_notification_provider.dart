@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/services/insight_notification_detector.dart';
@@ -45,12 +47,22 @@ const _kNextDaySummarySigKey = 'next_day_summary_sig';
 /// lock-to-unlock transition (so the first data load after unlocking is
 /// covered even if the transaction list itself didn't change while locked).
 /// Never analyzes while [isAppUnlockedProvider] is false.
+///
+/// Checks are run through a [LatestOnlySerialRunner] rather than fired off
+/// independently: [_checkForNewInsights] does several `await`s (permission
+/// checks, prefs, plugin calls), so if rapid transaction edits each spawned
+/// their own concurrent run, an older, now-stale run could finish after a
+/// newer one and overwrite its result. The runner guarantees at most one run
+/// in flight and always resumes with the latest transaction list.
 final insightNotificationWatcherProvider = Provider<void>((ref) {
+  final runner =
+      LatestOnlySerialRunner<List<tx.Transaction>>(_checkForNewInsights);
+
   void maybeCheck() {
     if (!ref.read(isAppUnlockedProvider)) return;
     final list = ref.read(transactionsProvider).valueOrNull;
     if (list == null) return;
-    _checkForNewInsights(list);
+    runner.schedule(list);
   }
 
   ref.listen<AsyncValue<List<tx.Transaction>>>(transactionsProvider,
@@ -62,6 +74,41 @@ final insightNotificationWatcherProvider = Provider<void>((ref) {
     if (next) maybeCheck();
   }, fireImmediately: true);
 });
+
+/// Runs [handler] for the most recently [schedule]d value, one at a time.
+///
+/// If a new value is scheduled while [handler] is still running for an
+/// older one, that older run is left to finish but no new run starts for
+/// it; the next run (once the current one completes) uses only the latest
+/// scheduled value, skipping any that were superseded in between. This
+/// guarantees handler calls never overlap and that a slow, now-stale call
+/// can never finish after — and clobber the effects of — a more recent one.
+class LatestOnlySerialRunner<T> {
+  LatestOnlySerialRunner(this._handler);
+
+  final Future<void> Function(T value) _handler;
+  T? _pending;
+  bool _hasPending = false;
+  bool _running = false;
+
+  void schedule(T value) {
+    _pending = value;
+    _hasPending = true;
+    if (_running) return;
+    _running = true;
+    unawaited(_drain());
+  }
+
+  Future<void> _drain() async {
+    while (_hasPending) {
+      _hasPending = false;
+      final value = _pending as T;
+      _pending = null;
+      await _handler(value);
+    }
+    _running = false;
+  }
+}
 
 /// Clears all persisted insight-notification state (unusual-spending
 /// signatures, next-day summary target/content) and cancels any
@@ -207,23 +254,12 @@ class NextDaySummaryUpdate {
   });
 }
 
-/// Pure decision logic for requirement 3 (combined next-day summary).
-///
 /// Builds one line per available result (projected month-end spending,
 /// spending pace, leading-category change — in that order, only the ones
-/// that are non-null), targets delivery for 11:00 local time on the day
-/// after [now], and compares against [storedTargetSignature]/
-/// [storedContentSignature] (whatever was persisted for the last scheduled
-/// summary) to decide whether anything needs to change. Returns `null` when
-/// there's nothing available to say yet, or when the would-be notification
-/// is identical to the one already pending — this is what prevents
-/// re-scheduling (and duplicate-notifying) on every minor recheck.
-NextDaySummaryUpdate? computeNextDaySummaryUpdate({
-  required SpendingSnapshot snapshot,
-  required DateTime now,
-  String? storedTargetSignature,
-  String? storedContentSignature,
-}) {
+/// that are non-null). Empty when nothing is eligible to report yet — or,
+/// after a recalculation, no longer eligible (e.g. the transaction behind
+/// it was edited or deleted).
+List<String> buildNextDaySummaryLines(SpendingSnapshot snapshot) {
   final lines = <String>[];
   if (snapshot.forecastProjected != null) {
     lines.add(
@@ -238,6 +274,25 @@ NextDaySummaryUpdate? computeNextDaySummaryUpdate({
     lines.add('Your leading spending category changed from '
         '${snapshot.categoryChange!.previous} to ${snapshot.categoryChange!.current}.');
   }
+  return lines;
+}
+
+/// Pure decision logic for requirement 3 (combined next-day summary):
+/// targets delivery for 11:00 local time on the day after [now], and
+/// compares against [storedTargetSignature]/[storedContentSignature]
+/// (whatever was persisted for the last scheduled summary) to decide
+/// whether anything needs to change. Returns `null` when there's nothing
+/// available to say yet ([buildNextDaySummaryLines] is empty), or when the
+/// would-be notification is identical (same target day and content) to the
+/// one already pending — this is what prevents re-scheduling (and
+/// duplicate-notifying) on every minor recheck.
+NextDaySummaryUpdate? computeNextDaySummaryUpdate({
+  required SpendingSnapshot snapshot,
+  required DateTime now,
+  String? storedTargetSignature,
+  String? storedContentSignature,
+}) {
+  final lines = buildNextDaySummaryLines(snapshot);
   if (lines.isEmpty) return null;
 
   final target = DateTime(now.year, now.month, now.day + 1, 11, 0);
@@ -256,32 +311,110 @@ NextDaySummaryUpdate? computeNextDaySummaryUpdate({
   );
 }
 
+/// What [_scheduleNextDaySummary] should do about the pending next-day
+/// summary notification, for a given recalculation.
+enum NextDaySummaryAction {
+  /// Nothing eligible, and nothing was pending either — no-op.
+  none,
+
+  /// Recalculation no longer has anything eligible to report, but something
+  /// was previously scheduled — cancel it and clear its stored signatures.
+  clear,
+
+  /// New or changed content — (re)schedule, replacing whatever was pending.
+  replace,
+}
+
+/// Result of [decideNextDaySummaryAction]: pure decision logic paired with
+/// the [NextDaySummaryUpdate] to apply when [action] is
+/// [NextDaySummaryAction.replace] (`null` otherwise).
+class NextDaySummaryDecision {
+  final NextDaySummaryAction action;
+  final NextDaySummaryUpdate? update;
+  const NextDaySummaryDecision._(this.action, this.update);
+  const NextDaySummaryDecision.none() : this._(NextDaySummaryAction.none, null);
+  const NextDaySummaryDecision.clear()
+      : this._(NextDaySummaryAction.clear, null);
+  NextDaySummaryDecision.replace(NextDaySummaryUpdate update)
+      : this._(NextDaySummaryAction.replace, update);
+}
+
+/// Pure decision logic for requirement 3 (combined next-day summary),
+/// covering all three outcomes a recalculation can produce:
+///  - nothing eligible now, and nothing was pending -> [NextDaySummaryAction.none]
+///  - nothing eligible now, but something *was* pending -> [NextDaySummaryAction.clear]
+///    (the previously scheduled summary must be cancelled and its stored
+///    signatures cleared, rather than left to fire with stale content)
+///  - eligible content that differs from what's pending (by target day or
+///    text) -> [NextDaySummaryAction.replace]
+///  - eligible content identical to what's already pending -> [NextDaySummaryAction.none]
+///    (do not reschedule)
+NextDaySummaryDecision decideNextDaySummaryAction({
+  required SpendingSnapshot snapshot,
+  required DateTime now,
+  String? storedTargetSignature,
+  String? storedContentSignature,
+}) {
+  if (buildNextDaySummaryLines(snapshot).isEmpty) {
+    final hadPending =
+        storedTargetSignature != null || storedContentSignature != null;
+    return hadPending
+        ? const NextDaySummaryDecision.clear()
+        : const NextDaySummaryDecision.none();
+  }
+
+  final update = computeNextDaySummaryUpdate(
+    snapshot: snapshot,
+    now: now,
+    storedTargetSignature: storedTargetSignature,
+    storedContentSignature: storedContentSignature,
+  );
+  return update == null
+      ? const NextDaySummaryDecision.none()
+      : NextDaySummaryDecision.replace(update);
+}
+
 // Combines whichever of {forecast, pace, leading-category change} are
 // currently available into a single expandable notification, scheduled for
 // 11:00 AM the next day rather than sent immediately. If the content that
-// would be shown changes before that delivery time, the pending notification is
-// replaced in place (same fixed id) rather than stacking a second one.
+// would be shown changes before that delivery time, the pending notification
+// is replaced in place (same fixed id) rather than stacking a second one. If
+// recalculation no longer has anything eligible to report, whatever was
+// pending is cancelled instead of being left to fire with stale content.
 Future<void> _scheduleNextDaySummary(
   NotificationService notifications,
   SharedPreferences prefs,
   SpendingSnapshot snapshot,
 ) async {
-  final update = computeNextDaySummaryUpdate(
+  final decision = decideNextDaySummaryAction(
     snapshot: snapshot,
     now: DateTime.now(),
     storedTargetSignature: prefs.getString(_kNextDaySummaryTargetKey),
     storedContentSignature: prefs.getString(_kNextDaySummarySigKey),
   );
-  if (update == null) return;
 
-  await notifications.cancelInsightNotification(kNextDaySummaryNotificationId);
-  await notifications.scheduleInsightNotification(
-    id: kNextDaySummaryNotificationId,
-    title: 'Your financial summary',
-    body: update.lines.join('\n'),
-    scheduledDate: update.scheduledDate,
-    expandable: true,
-  );
-  await prefs.setString(_kNextDaySummaryTargetKey, update.targetSignature);
-  await prefs.setString(_kNextDaySummarySigKey, update.contentSignature);
+  switch (decision.action) {
+    case NextDaySummaryAction.none:
+      return;
+    case NextDaySummaryAction.clear:
+      await notifications
+          .cancelInsightNotification(kNextDaySummaryNotificationId);
+      await prefs.remove(_kNextDaySummaryTargetKey);
+      await prefs.remove(_kNextDaySummarySigKey);
+      return;
+    case NextDaySummaryAction.replace:
+      final update = decision.update!;
+      await notifications
+          .cancelInsightNotification(kNextDaySummaryNotificationId);
+      await notifications.scheduleInsightNotification(
+        id: kNextDaySummaryNotificationId,
+        title: 'Your financial summary',
+        body: update.lines.join('\n'),
+        scheduledDate: update.scheduledDate,
+        expandable: true,
+      );
+      await prefs.setString(_kNextDaySummaryTargetKey, update.targetSignature);
+      await prefs.setString(_kNextDaySummarySigKey, update.contentSignature);
+      return;
+  }
 }

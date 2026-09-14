@@ -71,7 +71,27 @@ List<WalletBalanceUpdate> computeWalletBalanceUpdates({
 
 class AddTransactionScreen extends ConsumerStatefulWidget {
   final Transaction? transaction;
-  const AddTransactionScreen({super.key, this.transaction});
+
+  // Prefill fields for the payment-notification-monitoring flow (see
+  // `DetectedPayment.toPrefillMap()` / `/add-transaction`'s route in
+  // app_router.dart). Ignored when [transaction] is set (editing an
+  // existing transaction always wins). Never auto-saves — the user still
+  // has to review and press "Confirm Transaction".
+  final double? initialAmount;
+  final String? initialNote;
+  final String? initialCategory;
+  final String? initialAccountId;
+  final DateTime? initialDate;
+
+  const AddTransactionScreen({
+    super.key,
+    this.transaction,
+    this.initialAmount,
+    this.initialNote,
+    this.initialCategory,
+    this.initialAccountId,
+    this.initialDate,
+  });
 
   @override
   ConsumerState<AddTransactionScreen> createState() => _AddTransactionScreenState();
@@ -106,11 +126,18 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   void initState() {
     super.initState();
     final t = widget.transaction;
+    // Prefill mode: seeded from a detected payment notification rather than
+    // an existing saved transaction. Distinguished from a plain blank "Add
+    // Transaction" open so a missing suggested category is left unselected
+    // instead of defaulting to the first category in the list.
+    final isPrefill = t == null && widget.initialAmount != null;
     _type = t?.type ?? TransactionType.expense;
 
     // Default to the transaction's account, or pick the first real wallet
     if (t?.accountId != null) {
       _account = t!.accountId;
+    } else if (isPrefill && widget.initialAccountId != null) {
+      _account = widget.initialAccountId!;
     } else {
       final wallets = ref.read(walletsProvider).valueOrNull ?? [];
       final orderNotifier = ref.read(walletOrderProvider.notifier);
@@ -118,14 +145,19 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       _account = sorted.isNotEmpty ? sorted.first.id : '';
     }
 
-    _amount = t != null ? t.amount.toStringAsFixed(2) : '';
-    _noteCtrl = TextEditingController(text: t?.note ?? '');
-    _date = t?.date ?? DateTime.now();
+    _amount = t != null
+        ? t.amount.toStringAsFixed(2)
+        : (widget.initialAmount?.toStringAsFixed(2) ?? '');
+    _noteCtrl = TextEditingController(text: t?.note ?? widget.initialNote ?? '');
+    _date = t?.date ?? widget.initialDate ?? DateTime.now();
     _receiptImagePath = t?.receiptImagePath;
 
-    // Set initial category: use transaction's category or first in list
+    // Set initial category: use transaction's category, else the detected
+    // payment's suggested category (possibly unselected), else first in list
     if (t?.category != null) {
       _category = t!.category;
+    } else if (isPrefill) {
+      _category = widget.initialCategory ?? '';
     } else {
       final key = _type == TransactionType.income ? 'income' : 'expense';
       final cats = ref.read(categoriesProvider)[key] ?? [];

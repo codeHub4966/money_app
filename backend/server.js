@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import { fileURLToPath } from 'url';
 
 const app = express();
 app.use(cors());
@@ -52,8 +53,17 @@ app.post('/api/receipt/parse', async (req, res) => {
     imageMimeType,
   } = req.body ?? {};
 
-  if (typeof ocrText !== 'string' || ocrText.trim().length === 0) {
-    return res.status(400).json({ error: 'ocrText is required.' });
+  // The image, when present, is used only for this one request (passed
+  // straight through to Gemini) and is never written to disk or retained.
+  const safeImageBase64 = typeof imageBase64 === 'string' && imageBase64.trim().length > 0 ? imageBase64 : null;
+  const safeImageMimeType =
+    typeof imageMimeType === 'string' && imageMimeType.trim().length > 0 ? imageMimeType.trim() : 'image/jpeg';
+  const safeOcrText = typeof ocrText === 'string' && ocrText.trim().length > 0 ? ocrText : null;
+
+  // A receipt photo alone is enough for Gemini to work with — only reject
+  // when there is neither OCR text nor an image to analyze.
+  if (!safeOcrText && !safeImageBase64) {
+    return res.status(400).json({ error: 'ocrText or imageBase64 is required.' });
   }
 
   const safeLowConfidenceFields = Array.isArray(lowConfidenceFields)
@@ -75,14 +85,9 @@ app.post('/api/receipt/parse', async (req, res) => {
     typeof localCategory === 'string' && localCategory.trim().length > 0 ? localCategory.trim() : null;
   const safeLocalWallet =
     typeof localWallet === 'string' && localWallet.trim().length > 0 ? localWallet.trim() : null;
-  // The image, when present, is used only for this one request (passed
-  // straight through to Gemini) and is never written to disk or retained.
-  const safeImageBase64 = typeof imageBase64 === 'string' && imageBase64.trim().length > 0 ? imageBase64 : null;
-  const safeImageMimeType =
-    typeof imageMimeType === 'string' && imageMimeType.trim().length > 0 ? imageMimeType.trim() : 'image/jpeg';
 
   const prompt = buildPrompt({
-    ocrText,
+    ocrText: safeOcrText,
     lowConfidenceFields: safeLowConfidenceFields,
     categories: safeCategories,
     wallets: safeWallets,
@@ -141,7 +146,9 @@ ${hasImage
 photo — this is a full verification pass, not just a fix for the low-confidence fields above. The
 local parser's values below (including ones it was confident about) may still be wrong — for
 example it can misread a tax or service-charge line as the grand total. Trust what you can actually
-read in the image over both the OCR text and the local parser's values whenever they conflict.`
+read in the image over both the OCR text and the local parser's values whenever they conflict.${!ocrText
+        ? ' No OCR text was provided, so read the receipt directly from the image.'
+        : ''}`
     : 'No receipt image was provided — work only from the OCR text below.'}
 
 STRUCTURED CONTEXT ALREADY EXTRACTED LOCALLY (may be wrong — verify against the image/OCR text):
@@ -154,7 +161,7 @@ STRUCTURED CONTEXT ALREADY EXTRACTED LOCALLY (may be wrong — verify against th
 
 FULL OCR TEXT (verbatim, may contain OCR noise/typos):
 """
-${ocrText}
+${ocrText ? ocrText : '(no OCR text provided — read the receipt directly from the attached image)'}
 """
 
 EXISTING EXPENSE/INCOME CATEGORIES (choose "suggested_category" ONLY from this exact list, or null):
@@ -293,6 +300,12 @@ function normalizeResult(raw) {
   };
 }
 
-app.listen(PORT, () => {
-  console.log(`Receipt AI backend listening on port ${PORT}`);
-});
+// Only bind a port when this file is run directly (e.g. `node server.js`),
+// not when it's imported by tests.
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+  app.listen(PORT, () => {
+    console.log(`Receipt AI backend listening on port ${PORT}`);
+  });
+}
+
+export { app };
