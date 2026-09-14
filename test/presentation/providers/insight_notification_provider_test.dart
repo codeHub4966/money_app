@@ -11,6 +11,7 @@ Future<void> _pumpEventLoop() => Future<void>.delayed(Duration.zero);
 
 SpendingSnapshot _snapshot({
   double avgDay = 50,
+  double? avgNonZeroDay,
   int daysElapsed = 10,
   List<SpendingSpike> spikes = const [],
   double? pacePct,
@@ -23,6 +24,7 @@ SpendingSnapshot _snapshot({
 }) {
   return SpendingSnapshot(
     avgDay: avgDay,
+    avgNonZeroDay: avgNonZeroDay ?? avgDay,
     daysElapsed: daysElapsed,
     spikes: spikes,
     pacePct: pacePct,
@@ -58,7 +60,7 @@ void main() {
       expect(result.notifications.single.scheduledDate,
           now.add(const Duration(minutes: 3)));
       expect(result.notifications.single.title, 'Unusual spending detected');
-      expect(result.updatedSignatures, {'2026-03-06'});
+      expect(result.updatedEntries.keys, {'2026-03-06'});
     });
 
     test('does not mention any delay in the notification text', () {
@@ -75,14 +77,14 @@ void main() {
     });
 
     test(
-        'the multiplier in the body text is computed from the snapshot avgDay',
-        () {
-      // avgDay here is assumed already computed as spent/days-elapsed (as
-      // computeCurrentMonthSnapshot does) — this only checks that the
-      // multiplier passes that value through untouched rather than
-      // re-deriving it itself.
+        'the multiplier in the body text is computed from the snapshot avgNonZeroDay, '
+        'not the calendar-day avgDay', () {
+      // avgNonZeroDay here is assumed already computed as the average of
+      // non-zero spending days (as computeCurrentMonthSnapshot does) — this
+      // checks the multiplier passes that value through untouched rather
+      // than re-deriving it, and that it ignores avgDay entirely.
       final result = computeNewSpikesToSchedule(
-        snapshot: _snapshot(avgDay: 80, spikes: [spike]),
+        snapshot: _snapshot(avgDay: 20, avgNonZeroDay: 80, spikes: [spike]),
         alreadyScheduled: const {},
         now: now,
       );
@@ -91,16 +93,55 @@ void main() {
     });
 
     test(
-        'duplicate prevention: an already-scheduled spike is not scheduled again',
+        'duplicate prevention: an already-scheduled spike with unchanged content is not scheduled again',
         () {
-      final result = computeNewSpikesToSchedule(
+      final first = computeNewSpikesToSchedule(
         snapshot: _snapshot(spikes: [spike]),
-        alreadyScheduled: {'2026-03-06'},
+        alreadyScheduled: const {},
         now: now,
       );
 
-      expect(result.notifications, isEmpty);
-      expect(result.updatedSignatures, {'2026-03-06'});
+      final second = computeNewSpikesToSchedule(
+        snapshot: _snapshot(spikes: [spike]),
+        alreadyScheduled: first.updatedEntries,
+        now: now,
+      );
+
+      expect(second.notifications, isEmpty);
+      expect(second.updatedEntries.keys, {'2026-03-06'});
+    });
+
+    test(
+        'stale content: a still-current spike whose amount changed is rescheduled under the same id',
+        () {
+      final first = computeNewSpikesToSchedule(
+        snapshot: _snapshot(spikes: [spike]),
+        alreadyScheduled: const {},
+        now: now,
+      );
+      expect(first.notifications, hasLength(1));
+      final originalId = first.notifications.single.id;
+
+      // Same day, but the transaction behind the spike was edited so its
+      // amount (and thus the notification body) changed.
+      final editedSpike = SpendingSpike(
+        date: DateTime(2026, 3, 6),
+        amount: 500,
+        topCategory: 'Electronics',
+      );
+      final second = computeNewSpikesToSchedule(
+        snapshot: _snapshot(spikes: [editedSpike]),
+        alreadyScheduled: first.updatedEntries,
+        now: now.add(const Duration(minutes: 1)),
+      );
+
+      expect(second.notifications, hasLength(1));
+      expect(second.notifications.single.id, originalId);
+      expect(second.notifications.single.body,
+          isNot(first.notifications.single.body));
+      // Fresh ~3-minute delay from the latest recalculation.
+      expect(second.notifications.single.scheduledDate,
+          now.add(const Duration(minutes: 1)).add(kUnusualSpendingDelay));
     });
   });
 
@@ -120,6 +161,41 @@ void main() {
         currentSignatures: {'2026-03-06', '2026-03-08'},
       );
       expect(stale, isEmpty);
+    });
+
+    test(
+        'full scenario: a spike that disappears after recalculation is flagged stale and dropped',
+        () {
+      final now = DateTime(2026, 3, 10, 9, 0);
+      final spike = SpendingSpike(
+        date: DateTime(2026, 3, 6),
+        amount: 200,
+        topCategory: 'Electronics',
+      );
+
+      // First recalculation schedules the spike and persists its signature.
+      final first = computeNewSpikesToSchedule(
+        snapshot: _snapshot(spikes: [spike]),
+        alreadyScheduled: const {},
+        now: now,
+      );
+      expect(first.notifications, hasLength(1));
+
+      // The underlying transaction was edited/deleted so it's no longer an
+      // unusual-spending day — the next recalculation has no spikes.
+      final stale = staleSignaturesToCancel(
+        alreadyScheduled: first.updatedEntries.keys.toSet(),
+        currentSignatures: const {},
+      );
+      expect(stale, {'2026-03-06'});
+
+      // Nothing new to schedule for an empty spike list.
+      final second = computeNewSpikesToSchedule(
+        snapshot: _snapshot(spikes: const []),
+        alreadyScheduled: first.updatedEntries,
+        now: now,
+      );
+      expect(second.notifications, isEmpty);
     });
   });
 
@@ -146,17 +222,53 @@ void main() {
           now.add(kUnusualSpendingDelay));
       expect(result.notifications.single.body, contains('Food'));
       expect(result.notifications.single.body, contains('RM320'));
-      expect(result.updatedSignatures, {'budget_risk:Food'});
+      expect(result.updatedEntries.keys, {'budget_risk:Food'});
     });
 
-    test('duplicate prevention: an already-scheduled category risk is not scheduled again',
+    test(
+        'duplicate prevention: an already-scheduled category risk with unchanged content is not scheduled again',
         () {
-      final result = computeNewBudgetRisksToSchedule(
+      final first = computeNewBudgetRisksToSchedule(
         risks: [risk],
-        alreadyScheduled: {'budget_risk:Food'},
+        alreadyScheduled: const {},
         now: now,
       );
-      expect(result.notifications, isEmpty);
+      final second = computeNewBudgetRisksToSchedule(
+        risks: [risk],
+        alreadyScheduled: first.updatedEntries,
+        now: now,
+      );
+      expect(second.notifications, isEmpty);
+    });
+
+    test(
+        'stale content: a still-current risk whose overage amount changed is rescheduled under the same id',
+        () {
+      final first = computeNewBudgetRisksToSchedule(
+        risks: [risk],
+        alreadyScheduled: const {},
+        now: now,
+      );
+      final originalId = first.notifications.single.id;
+
+      const changedRisk = BudgetRisk(
+        category: 'Food',
+        monthlyLimit: 300,
+        spent: 250,
+        projected: 700,
+        overageAmount: 400,
+      );
+      final second = computeNewBudgetRisksToSchedule(
+        risks: [changedRisk],
+        alreadyScheduled: first.updatedEntries,
+        now: now.add(const Duration(minutes: 1)),
+      );
+
+      expect(second.notifications, hasLength(1));
+      expect(second.notifications.single.id, originalId);
+      expect(second.notifications.single.body, contains('RM400'));
+      expect(second.notifications.single.scheduledDate,
+          now.add(const Duration(minutes: 1)).add(kUnusualSpendingDelay));
     });
   });
 
@@ -183,18 +295,52 @@ void main() {
           now.add(kUnusualSpendingDelay));
       expect(result.notifications.single.body, contains('Shopping'));
       expect(result.notifications.single.body, contains('45%'));
-      expect(result.updatedSignatures, {'overspend:Shopping'});
+      expect(result.updatedEntries.keys, {'overspend:Shopping'});
     });
 
     test(
-        'duplicate prevention: an already-scheduled category overspend is not scheduled again',
+        'duplicate prevention: an already-scheduled category overspend with unchanged content is not scheduled again',
         () {
-      final result = computeNewCategoryOverspendToSchedule(
+      final first = computeNewCategoryOverspendToSchedule(
         overspends: [overspend],
-        alreadyScheduled: {'overspend:Shopping'},
+        alreadyScheduled: const {},
         now: now,
       );
-      expect(result.notifications, isEmpty);
+      final second = computeNewCategoryOverspendToSchedule(
+        overspends: [overspend],
+        alreadyScheduled: first.updatedEntries,
+        now: now,
+      );
+      expect(second.notifications, isEmpty);
+    });
+
+    test(
+        'stale content: a still-current overspend whose percentage changed is rescheduled under the same id',
+        () {
+      final first = computeNewCategoryOverspendToSchedule(
+        overspends: [overspend],
+        alreadyScheduled: const {},
+        now: now,
+      );
+      final originalId = first.notifications.single.id;
+
+      const changedOverspend = CategoryOverspend(
+        category: 'Shopping',
+        currentAmount: 200,
+        previousAmount: 100,
+        pctIncrease: 100,
+      );
+      final second = computeNewCategoryOverspendToSchedule(
+        overspends: [changedOverspend],
+        alreadyScheduled: first.updatedEntries,
+        now: now.add(const Duration(minutes: 1)),
+      );
+
+      expect(second.notifications, hasLength(1));
+      expect(second.notifications.single.id, originalId);
+      expect(second.notifications.single.body, contains('100%'));
+      expect(second.notifications.single.scheduledDate,
+          now.add(const Duration(minutes: 1)).add(kUnusualSpendingDelay));
     });
   });
 

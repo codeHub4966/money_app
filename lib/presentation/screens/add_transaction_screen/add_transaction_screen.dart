@@ -6,9 +6,11 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/transaction_wallet_service.dart';
 import '../../../domain/models/transaction.dart';
 import '../../../domain/models/wallet.dart';
 import '../../../domain/models/app_category.dart';
+import '../../../core/services/receipt_file_service.dart';
 import '../../../core/services/receipt_scanner_service.dart';
 import '../../../core/services/receipt_enrichment_service.dart';
 import '../../../core/services/receipt_wallet_matcher.dart';
@@ -27,6 +29,29 @@ const _kBgColors = [
 double balanceEffect(TransactionType type, double amount) {
   return type == TransactionType.income ? amount : -amount;
 }
+
+/// The permanent on-disk path a receipt for [transactionId] is stored at,
+/// given the app's documents directory [docsPath].
+String receiptPermanentPath(String docsPath, String transactionId) =>
+    '$docsPath/receipts/$transactionId.jpg';
+
+/// Whether [candidatePath] already points at [transactionId]'s permanent
+/// receipt file (given documents directory [docsPath]) — e.g. when editing a
+/// transaction without picking a new photo. When true, there is nothing to
+/// copy, and attempting to copy the file onto itself can fail on some
+/// platforms, so callers should reuse [candidatePath] directly instead.
+bool isAlreadyPermanentReceiptPath(
+        String candidatePath, String docsPath, String transactionId) =>
+    candidatePath == receiptPermanentPath(docsPath, transactionId);
+
+/// Whether the old receipt file at [oldPath] is no longer referenced by
+/// [newPath] and should be cleaned up after a successful save — i.e. the
+/// receipt was removed, or replaced by a genuinely different file. `false`
+/// when there was no old receipt, or the path is unchanged (including the
+/// common edit case where the same permanent path was simply overwritten in
+/// place).
+bool shouldDeleteOldReceipt(String? oldPath, String? newPath) =>
+    oldPath != null && oldPath != newPath;
 
 /// A single wallet balance write to apply.
 class WalletBalanceUpdate {
@@ -293,8 +318,7 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     }
 
     setState(() => _saving = true);
-    final txRepo = ref.read(transactionRepositoryProvider);
-    final walletRepo = ref.read(walletRepositoryProvider);
+    final txService = ref.read(transactionWalletServiceProvider);
 
     final old = widget.transaction;
     final oldWallet = (old != null && old.accountId != wallet.id)
@@ -307,11 +331,9 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       newType: _type,
       newAmount: amount,
     );
-    for (final update in updates) {
-      await walletRepo.updateBalance(update.walletId, update.balance);
-    }
 
     final transactionId = widget.transaction?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
+    final oldReceiptPath = widget.transaction?.receiptImagePath;
     String? savedReceiptPath;
 
     // Save receipt image to permanent storage if exists
@@ -319,16 +341,32 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
       savedReceiptPath = await _saveReceiptImage(_receiptImagePath!, transactionId);
     }
 
-    await txRepo.add(Transaction(
-      id: transactionId,
-      type: _type,
-      amount: amount,
-      category: _category,
-      accountId: _account,
-      note: _noteCtrl.text.isEmpty ? null : _noteCtrl.text,
-      date: _date,
-      receiptImagePath: savedReceiptPath,
-    ));
+    // Wallet balance update(s) and the transaction row are written together
+    // atomically, so a failure partway through never leaves a wallet
+    // balance changed without its transaction saved.
+    await txService.saveTransaction(
+      transaction: Transaction(
+        id: transactionId,
+        type: _type,
+        amount: amount,
+        category: _category,
+        accountId: _account,
+        note: _noteCtrl.text.isEmpty ? null : _noteCtrl.text,
+        date: _date,
+        receiptImagePath: savedReceiptPath,
+      ),
+      walletUpdates: updates
+          .map((u) => WalletBalanceWrite(u.walletId, u.balance))
+          .toList(),
+    );
+
+    // Only clean up the old receipt file once the database write has
+    // succeeded, and only if it's no longer referenced (e.g. the user
+    // removed it) — best-effort, never allowed to affect the saved
+    // transaction.
+    if (shouldDeleteOldReceipt(oldReceiptPath, savedReceiptPath)) {
+      await deleteReceiptFileBestEffort(oldReceiptPath);
+    }
 
     // Learn the payment-fingerprint -> wallet mapping only from this final,
     // user-confirmed save — never from an automatic guess.
@@ -340,17 +378,24 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
   }
 
   Future<String?> _saveReceiptImage(String tempPath, String transactionId) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final permanentPath = receiptPermanentPath(dir.path, transactionId);
+
+    // Already pointing at this transaction's permanent receipt file (e.g.
+    // editing without picking a new photo) — there's nothing to copy, and
+    // copying the file onto itself can fail on some platforms. Returning
+    // the existing path directly means a failed self-copy can never null
+    // out the saved receiptImagePath.
+    if (isAlreadyPermanentReceiptPath(tempPath, dir.path, transactionId)) {
+      return permanentPath;
+    }
+
     try {
-      final dir = await getApplicationDocumentsDirectory();
       final receiptsDir = Directory('${dir.path}/receipts');
       if (!await receiptsDir.exists()) {
         await receiptsDir.create(recursive: true);
       }
-
-      final fileName = '$transactionId.jpg';
-      final permanentPath = '${receiptsDir.path}/$fileName';
       await File(tempPath).copy(permanentPath);
-
       return permanentPath;
     } catch (e) {
       return null;

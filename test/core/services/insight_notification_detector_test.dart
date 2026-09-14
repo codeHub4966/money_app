@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:money_app_flutter/core/services/insight_notification_detector.dart';
 import 'package:money_app_flutter/core/utils/merchant_pattern_detector.dart';
 import 'package:money_app_flutter/core/utils/spending_anomaly.dart';
+import 'package:money_app_flutter/core/utils/spending_forecast_calculator.dart';
 import 'package:money_app_flutter/domain/models/budget.dart';
 import 'package:money_app_flutter/domain/models/transaction.dart';
 
@@ -159,6 +160,34 @@ void main() {
 
       expect(snapshot, isNotNull);
       expect(snapshot!.avgDay, expectedAvgDay);
+    });
+  });
+
+  group('avgNonZeroDay (used for the unusual-spending multiplier)', () {
+    test('averages only days with recorded spending, unlike avgDay', () {
+      // Spending only on days 1, 3, 5, 7, 9 — days 2, 4, 6, 8, 10 are RM0.
+      final transactions = [
+        _tx(amount: 10, date: DateTime(2026, 3, 1)),
+        _tx(amount: 20, date: DateTime(2026, 3, 3)),
+        _tx(amount: 30, date: DateTime(2026, 3, 5)),
+        _tx(amount: 40, date: DateTime(2026, 3, 7)),
+        _tx(amount: 300, date: DateTime(2026, 3, 9), category: 'Electronics'),
+      ];
+
+      final snapshot =
+          computeCurrentMonthSnapshot(transactions, DateTime(2026, 3, 10));
+
+      expect(snapshot, isNotNull);
+      // 400 spent across 5 non-zero days -> 80, not 400/10 (= avgDay's 40).
+      expect(snapshot!.avgNonZeroDay, 80);
+      expect(snapshot.avgNonZeroDay, isNot(snapshot.avgDay));
+    });
+
+    test(
+        'computeAvgPerNonZeroDay returns 0 for an all-RM0 window (avoids division by zero)',
+        () {
+      expect(computeAvgPerNonZeroDay([0, 0, 0]), 0.0);
+      expect(computeAvgPerNonZeroDay(const []), 0.0);
     });
   });
 

@@ -1,10 +1,86 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../core/services/receipt_file_service.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/transaction_wallet_service.dart';
 import '../../../domain/models/transaction.dart';
 import '../../../domain/models/wallet.dart';
 import '../../providers/app_providers.dart';
+
+/// Everything needed to delete [transaction] and reverse its effect on the
+/// relevant wallet balance(s) — computed purely from the freshest
+/// transaction/wallet lists passed in, so an edited transaction's *latest*
+/// amount, type, account, and category are always what gets reversed, never
+/// a stale snapshot. Side-effect free, which is what makes it independently
+/// testable without a widget tree.
+class DeleteTransactionPlan {
+  final List<WalletBalanceWrite> walletUpdates;
+  final String? pairedTransactionId;
+  final String? pairedReceiptPath;
+  const DeleteTransactionPlan({
+    required this.walletUpdates,
+    this.pairedTransactionId,
+    this.pairedReceiptPath,
+  });
+}
+
+DeleteTransactionPlan computeDeleteTransactionPlan({
+  required Transaction transaction,
+  required List<Wallet> wallets,
+  required List<Transaction> allTransactions,
+}) {
+  final wallet =
+      wallets.where((w) => w.id == transaction.accountId).firstOrNull;
+  final updates = <WalletBalanceWrite>[];
+
+  if (transaction.category == 'Transfer') {
+    // Transfer: reverse the transaction for this wallet.
+    // If this is the "out" transaction (expense), add amount back.
+    // If this is the "in" transaction (income), subtract amount.
+    if (wallet != null) {
+      final reversal = transaction.type == TransactionType.income
+          ? -transaction.amount
+          : transaction.amount;
+      updates.add(WalletBalanceWrite(wallet.id, wallet.balance + reversal));
+    }
+
+    // Find the paired transfer transaction and reverse it too.
+    final pairedId = transaction.id.endsWith('_out')
+        ? transaction.id.replaceAll('_out', '_in')
+        : transaction.id.replaceAll('_in', '_out');
+    final paired =
+        allTransactions.where((tx) => tx.id == pairedId).firstOrNull;
+
+    if (paired != null) {
+      final pairedWallet =
+          wallets.where((w) => w.id == paired.accountId).firstOrNull;
+      if (pairedWallet != null) {
+        final pairedReversal = paired.type == TransactionType.income
+            ? -paired.amount
+            : paired.amount;
+        updates.add(WalletBalanceWrite(
+            pairedWallet.id, pairedWallet.balance + pairedReversal));
+      }
+    }
+
+    return DeleteTransactionPlan(
+      walletUpdates: updates,
+      pairedTransactionId: paired?.id,
+      pairedReceiptPath: paired?.receiptImagePath,
+    );
+  }
+
+  // Balance Adjustment and regular income/expense both simply reverse the
+  // transaction's effect on its wallet.
+  if (wallet != null) {
+    final reversal = transaction.type == TransactionType.income
+        ? -transaction.amount
+        : transaction.amount;
+    updates.add(WalletBalanceWrite(wallet.id, wallet.balance + reversal));
+  }
+  return DeleteTransactionPlan(walletUpdates: updates);
+}
 
 class TransactionDetailsScreen extends ConsumerWidget {
   final Transaction? transaction;
@@ -72,7 +148,7 @@ class TransactionDetailsScreen extends ConsumerWidget {
               icon: Icons.delete_outline_rounded,
               color: Colors.red,
               onTap: () async {
-                if (transaction == null) return;
+                if (live == null) return;
                 final confirm = await showDialog<bool>(
                   context: context,
                   builder: (_) => AlertDialog(
@@ -90,68 +166,47 @@ class TransactionDetailsScreen extends ConsumerWidget {
                     ],
                   ),
                 );
-                if (confirm == true && context.mounted) {
-                  final t = transaction!;
-                  final wallets = ref.read(walletsProvider).valueOrNull ?? [];
-                  final wallet =
-                      wallets.where((w) => w.id == t.accountId).firstOrNull;
-                  final walletRepo = ref.read(walletRepositoryProvider);
-                  final txRepo = ref.read(transactionRepositoryProvider);
+                if (confirm != true || !context.mounted) return;
 
-                  if (wallet != null) {
-                    if (t.category == 'Transfer') {
-                      // Transfer: reverse the transaction for this wallet
-                      // If this is the "out" transaction (expense), add amount back
-                      // If this is the "in" transaction (income), subtract amount
-                      final reversal = t.type == TransactionType.income
-                          ? -t.amount // was income → subtract
-                          : t.amount; // was expense → add back
-                      await walletRepo.updateBalance(
-                          wallet.id, wallet.balance + reversal);
-
-                      // Find and delete the paired transfer transaction
-                      final allTx =
-                          ref.read(transactionsProvider).valueOrNull ?? [];
-                      final pairedId = t.id.endsWith('_out')
-                          ? t.id.replaceAll('_out', '_in')
-                          : t.id.replaceAll('_in', '_out');
-                      final paired =
-                          allTx.where((tx) => tx.id == pairedId).firstOrNull;
-
-                      if (paired != null) {
-                        final pairedWallet = wallets
-                            .where((w) => w.id == paired.accountId)
-                            .firstOrNull;
-                        if (pairedWallet != null) {
-                          final pairedReversal =
-                              paired.type == TransactionType.income
-                                  ? -paired.amount
-                                  : paired.amount;
-                          await walletRepo.updateBalance(pairedWallet.id,
-                              pairedWallet.balance + pairedReversal);
-                        }
-                        await txRepo.delete(paired.id);
-                      }
-                    } else if (t.category == 'Balance Adjustment') {
-                      // Balance Adjustment: reverse the adjustment
-                      final reversal = t.type == TransactionType.income
-                          ? -t.amount // was income → subtract
-                          : t.amount; // was expense → add back
-                      await walletRepo.updateBalance(
-                          wallet.id, wallet.balance + reversal);
-                    } else {
-                      // Regular income/expense: reverse the transaction
-                      final reversal = t.type == TransactionType.income
-                          ? -t.amount // was income → subtract
-                          : t.amount; // was expense → add back
-                      await walletRepo.updateBalance(
-                          wallet.id, wallet.balance + reversal);
-                    }
-                  }
-
-                  await txRepo.delete(t.id);
+                // Re-resolve from the freshest transaction list right
+                // before acting (rather than trusting the `live` value
+                // captured at build time) so a delete always reverses
+                // whatever amount/wallet/category is currently saved — and
+                // so a transaction that was already removed elsewhere is
+                // handled safely instead of double-reversing stale data.
+                final allTx = ref.read(transactionsProvider).valueOrNull ?? [];
+                final t = allTx.where((tx) => tx.id == live.id).firstOrNull;
+                if (t == null) {
                   if (context.mounted) context.pop();
+                  return;
                 }
+
+                final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+                final txService = ref.read(transactionWalletServiceProvider);
+                final plan = computeDeleteTransactionPlan(
+                  transaction: t,
+                  wallets: wallets,
+                  allTransactions: allTx,
+                );
+
+                if (plan.pairedTransactionId != null) {
+                  await txService.deleteTransferPair(
+                    outId:
+                        t.id.endsWith('_out') ? t.id : plan.pairedTransactionId!,
+                    inId: t.id.endsWith('_in') ? t.id : plan.pairedTransactionId!,
+                    walletUpdates: plan.walletUpdates,
+                  );
+                } else {
+                  await txService.deleteTransaction(
+                      transactionId: t.id, walletUpdates: plan.walletUpdates);
+                }
+
+                // Only clean up the receipt file(s) once the database write
+                // has actually succeeded, and best-effort only.
+                await deleteReceiptFileBestEffort(t.receiptImagePath);
+                await deleteReceiptFileBestEffort(plan.pairedReceiptPath);
+
+                if (context.mounted) context.pop();
               },
             ),
           ]),

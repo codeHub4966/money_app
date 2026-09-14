@@ -22,6 +22,17 @@ List<double> computeDailyTotals(List<tx.Transaction> monthTx, int daysInMonth) {
 double computeAvgPerDay(double spent, int daysElapsed) =>
     daysElapsed > 0 ? spent / daysElapsed : 0.0;
 
+/// Average spend across only the days that had any recorded spending ("your
+/// normal spending day"), used for the unusual-spending multiplier so a
+/// month with many RM0 days doesn't understate how much bigger a spike is
+/// than a typical spending day. [recorded] must be the per-day totals for
+/// days `1..daysElapsed` only. Returns 0 when there are no non-zero days.
+double computeAvgPerNonZeroDay(List<double> recorded) {
+  final nonZero = recorded.where((v) => v > 0).toList();
+  if (nonZero.isEmpty) return 0.0;
+  return nonZero.fold(0.0, (s, v) => s + v) / nonZero.length;
+}
+
 /// Result of [computeSevenDayPace]: the trailing-7-day daily average vs the
 /// daily average for the rest of the elapsed month, and the percent change
 /// between them. All fields are null when there isn't enough elapsed history

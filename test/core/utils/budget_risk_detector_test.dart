@@ -143,5 +143,37 @@ void main() {
       );
       expect(risks, hasLength(1));
     });
+
+    test(
+        'returns every category at risk (more than 3), sorted by overage '
+        'descending — the detector itself never truncates; only the UI '
+        'limits to the top 3', () {
+      final risks = detectBudgetRisks(
+        budgets: [
+          _budget('Food', 100), // RM20/day -> projected 620, overage 520
+          _budget('Shopping', 200), // overage 420
+          _budget('Transport', 300), // overage 320
+          _budget('Entertainment', 400), // overage 220
+        ],
+        monthTx: [
+          for (var d = 1; d <= 10; d++) ...[
+            _tx(amount: 20, date: DateTime(2026, 3, d), category: 'Food'),
+            _tx(amount: 20, date: DateTime(2026, 3, d), category: 'Shopping'),
+            _tx(amount: 20, date: DateTime(2026, 3, d), category: 'Transport'),
+            _tx(
+                amount: 20,
+                date: DateTime(2026, 3, d),
+                category: 'Entertainment'),
+          ],
+        ],
+        month: month,
+        daysElapsed: 10,
+        daysInMonth: daysInMonth,
+      );
+
+      expect(risks, hasLength(4));
+      expect(risks.map((r) => r.category).toList(),
+          ['Food', 'Shopping', 'Transport', 'Entertainment']);
+    });
   });
 }

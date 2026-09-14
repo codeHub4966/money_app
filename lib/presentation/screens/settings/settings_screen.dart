@@ -9,6 +9,7 @@ import '../../../core/services/pin_service.dart';
 import '../../../core/services/export_service.dart';
 import '../../../core/services/backup_service.dart';
 import '../../../core/services/import_service.dart';
+import '../../../data/local/app_database.dart' hide Transaction, Wallet;
 import '../../../data/repositories/wallet_repository.dart';
 import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/app_category.dart';
@@ -38,7 +39,7 @@ class _State extends ConsumerState<SettingsScreen> {
   String _name = 'User';
   bool _editing = false;
   final _nameCtrl = TextEditingController();
-  String? _savedPin;
+  bool _hasPin = false;
   String? _profileImagePath;
   bool _reminderEnabled = false;
   TimeOfDay? _reminderTime;
@@ -51,9 +52,9 @@ class _State extends ConsumerState<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    PinService.getPin().then((p) => setState(() {
-      _savedPin = p;
-      _pinEnabled = p != null;
+    PinService.hasPin().then((has) => setState(() {
+      _hasPin = has;
+      _pinEnabled = has;
     }));
     PinService.isBiometricEnabled().then((b) => setState(() => _biometricEnabled = b));
     SharedPreferences.getInstance().then((prefs) {
@@ -169,19 +170,22 @@ class _State extends ConsumerState<SettingsScreen> {
             key: pinKey,
             title: 'Current PIN',
             subtitle: 'Enter your PIN to disable it',
-            onSuccess: (pin) {
-              if (pin != _savedPin) {
+            onSuccess: (pin) async {
+              final ok = await PinService.verifyPin(pin);
+              if (!ok) {
                 pinKey.currentState?.showWrongPinError();
                 return;
               }
-              PinService.deletePin();
+              await PinService.deletePin();
               setState(() {
-                _savedPin = null;
+                _hasPin = false;
                 _pinEnabled = false;
               });
-              Navigator.of(ctx, rootNavigator: true).pop();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('PIN deleted.')));
+              if (ctx.mounted) Navigator.of(ctx, rootNavigator: true).pop();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('PIN deleted.')));
+              }
             },
           ),
         ),
@@ -238,10 +242,10 @@ class _State extends ConsumerState<SettingsScreen> {
             builder: (ctx2) => PinScreen(
               title: 'Confirm PIN',
               subtitle: 'Re-enter your PIN to confirm',
-              onSuccess: (confirm) {
+              onSuccess: (confirm) async {
                 if (confirm == firstPin) {
-                  PinService.setPin(confirm);
-                  setState(() { _savedPin = confirm; _pinEnabled = true; });
+                  await PinService.setPin(confirm);
+                  setState(() { _hasPin = true; _pinEnabled = true; });
                   Navigator.of(ctx2, rootNavigator: true).pop();
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('PIN created successfully.')));
@@ -267,11 +271,13 @@ class _State extends ConsumerState<SettingsScreen> {
         key: pinKey,
         title: 'Current PIN',
         subtitle: 'Enter your current PIN',
-        onSuccess: (pin) {
-          if (pin != _savedPin) {
+        onSuccess: (pin) async {
+          final ok = await PinService.verifyPin(pin);
+          if (!ok) {
             pinKey.currentState?.showWrongPinError();
             return;
           }
+          if (!ctx1.mounted) return;
           String? firstPin;
           Navigator.of(ctx1, rootNavigator: true).pushReplacement(MaterialPageRoute(
             fullscreenDialog: true,
@@ -285,11 +291,11 @@ class _State extends ConsumerState<SettingsScreen> {
                   builder: (ctx3) => PinScreen(
                     title: 'Confirm PIN',
                     subtitle: 'Re-enter your new PIN',
-                    onSuccess: (confirm) {
+                    onSuccess: (confirm) async {
                       Navigator.of(ctx3, rootNavigator: true).pop();
                       if (confirm == firstPin) {
-                        PinService.setPin(confirm);
-                        setState(() => _savedPin = confirm);
+                        await PinService.setPin(confirm);
+                        setState(() => _hasPin = true);
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('PIN updated successfully.')));
                       } else {
@@ -448,7 +454,7 @@ class _State extends ConsumerState<SettingsScreen> {
                     value: _pinEnabled,
                     onChanged: _onPinToggle,
                   ),
-                  if (_savedPin != null) ...[
+                  if (_hasPin) ...[
                     Divider(color: AppTheme.surfaceContainerLow),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -555,15 +561,36 @@ class _State extends ConsumerState<SettingsScreen> {
       isScrollControlled: true,
       useRootNavigator: true,
       builder: (_) => _ImportSheet(
+        db: ref.read(appDatabaseProvider),
         txRepo: ref.read(transactionRepositoryProvider),
         walletRepo: ref.read(walletRepositoryProvider),
         budgetRepo: ref.read(budgetRepositoryProvider),
-        onImported: () {
+        onImported: () async {
           ref.read(categoriesProvider.notifier).reloadFromPrefs();
           ref.read(walletOrderProvider.notifier).reloadFromPrefs();
+          await _reloadProfileFromPrefs();
+          await PinService.hasPin().then((has) {
+            if (mounted) setState(() { _hasPin = has; _pinEnabled = has; });
+          });
         },
       ),
     );
+  }
+
+  /// Re-reads profile name/image from SharedPreferences — used after a
+  /// Full Restore replaces them, since they're otherwise only loaded once
+  /// in [initState].
+  Future<void> _reloadProfileFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final path = prefs.getString(_profileImageKey);
+    final name = prefs.getString(_profileNameKey);
+    if (mounted) {
+      setState(() {
+        _profileImagePath = path;
+        _name = (name != null && name.isNotEmpty) ? name : 'User';
+        _nameCtrl.text = _name;
+      });
+    }
   }
 
   void _showDeleteAllData(BuildContext context) async {
@@ -763,11 +790,13 @@ class _ExportSheetState extends State<_ExportSheet> {
 }
 
 class _ImportSheet extends StatefulWidget {
+  final AppDatabase db;
   final ITransactionRepository txRepo;
   final IWalletRepository walletRepo;
   final IBudgetRepository budgetRepo;
-  final VoidCallback onImported;
+  final Future<void> Function() onImported;
   const _ImportSheet({
+    required this.db,
     required this.txRepo,
     required this.walletRepo,
     required this.budgetRepo,
@@ -792,15 +821,32 @@ class _ImportSheetState extends State<_ImportSheet> {
   }
 
   Future<void> _run() async {
+    if (_format == 'json') {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Full Restore will replace your data'),
+          content: const Text(
+              'Restoring this backup will REPLACE all current transactions, wallets, budgets, categories, wallet order and profile info with the contents of the backup file. This cannot be undone.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Replace Data'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    if (!mounted) return;
     setState(() { _loading = true; _message = null; _isError = false; });
     try {
       if (_format == 'json') {
-        final summary = await BackupService.importBackup(
-          txRepo: widget.txRepo,
-          walletRepo: widget.walletRepo,
-          budgetRepo: widget.budgetRepo,
-        );
-        widget.onImported();
+        final summary = await BackupService.importBackup(db: widget.db);
+        await widget.onImported();
         setState(() { _message = '✅ Import successful!\n$summary'; _isError = false; });
       } else {
         final summary = _format == 'csv'

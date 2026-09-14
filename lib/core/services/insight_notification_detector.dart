@@ -28,6 +28,7 @@ class SpendingSpike {
 
 class SpendingSnapshot {
   final double avgDay;
+  final double avgNonZeroDay;
   final int daysElapsed;
   final List<SpendingSpike> spikes;
   final double? pacePct;
@@ -41,6 +42,7 @@ class SpendingSnapshot {
   final SavingOpportunity? savingOpportunity;
   const SpendingSnapshot({
     required this.avgDay,
+    required this.avgNonZeroDay,
     required this.daysElapsed,
     required this.spikes,
     this.pacePct,
@@ -75,6 +77,9 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
 
   // Calendar-day average: total spent so far ÷ days elapsed this month.
   final avgDay = computeAvgPerDay(spent, daysElapsed);
+  // Average of only the days with recorded spending — used for the unusual
+  // spending multiplier so RM0 days don't understate a spike's size.
+  final avgNonZeroDay = computeAvgPerNonZeroDay(recorded);
 
   // Unusual spending days: IQR rule shared with the Insights tab.
   final spikes = detectUnusualSpendingDays(
@@ -137,8 +142,11 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
     daysElapsed: daysElapsed,
   );
 
-  // Merchant repeated/recurring spending patterns.
-  final allEligibleTx = all.where(isEligibleExpense).toList();
+  // Merchant repeated/recurring spending patterns. Cut off at the end of
+  // the current month (the only month this snapshot ever covers) — shared
+  // with insights_tab.dart's historical-month cutoff so both call sites
+  // agree on what "up to this point" means.
+  final allEligibleTx = eligibleExpensesUpToMonth(all, month);
   final merchantPatterns = detectMerchantPatterns(
     currentMonthTx: monthTx,
     allEligibleTx: allEligibleTx,
@@ -154,6 +162,7 @@ SpendingSnapshot? computeCurrentMonthSnapshot(
 
   return SpendingSnapshot(
     avgDay: avgDay,
+    avgNonZeroDay: avgNonZeroDay,
     daysElapsed: daysElapsed,
     spikes: spikes,
     pacePct: pacePct,

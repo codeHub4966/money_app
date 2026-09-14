@@ -57,6 +57,29 @@ void main() {
     });
   });
 
+  group('computeAvgPerNonZeroDay', () {
+    test('divides total spend by only the non-zero spending days', () {
+      // 400 spent, but only 5 of the 10 elapsed days have any spending.
+      final recorded = <double>[10.0, 0, 20, 0, 30, 0, 40, 0, 300, 0];
+      expect(computeAvgPerNonZeroDay(recorded), 80);
+    });
+
+    test('differs from computeAvgPerDay when there are RM0 days', () {
+      final recorded = <double>[10.0, 0, 20, 0, 30, 0, 40, 0, 300, 0];
+      final spent = recorded.fold(0.0, (s, v) => s + v);
+      expect(computeAvgPerNonZeroDay(recorded),
+          isNot(computeAvgPerDay(spent, recorded.length)));
+    });
+
+    test('returns 0 for an all-RM0 window (avoids division by zero)', () {
+      expect(computeAvgPerNonZeroDay(List<double>.filled(10, 0)), 0);
+    });
+
+    test('returns 0 for an empty window', () {
+      expect(computeAvgPerNonZeroDay(const []), 0);
+    });
+  });
+
   group('computeSevenDayPace', () {
     test('returns nulls when fewer than 8 days have elapsed', () {
       final recorded = List<double>.filled(7, 10);

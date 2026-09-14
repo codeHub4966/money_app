@@ -1,24 +1,65 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:local_auth/local_auth.dart';
 
 class PinService {
-  static const _key = 'app_pin';
+  static const _secureHashKey = 'app_pin_hash_v1';
+  // Legacy plaintext key from before secure storage was introduced. Only
+  // ever read once, to migrate; never written to again.
+  static const _legacyPlaintextKey = 'app_pin';
   static const _biometricKey = 'biometric_enabled';
+  // Fixed, app-specific salt (not a secret on its own) so a bare SHA-256
+  // rainbow-table lookup of a raw 4-digit PIN doesn't work against this hash.
+  static const _pinSalt = 'money_app_flutter::pin::v1';
+
+  static const _storage = FlutterSecureStorage();
   static final LocalAuthentication _localAuth = LocalAuthentication();
 
-  static Future<String?> getPin() async {
+  static String _hashPin(String pin) =>
+      sha256.convert(utf8.encode('$_pinSalt:$pin')).toString();
+
+  /// Migrates a legacy plaintext PIN (SharedPreferences) to the secure
+  /// hashed representation, if one is still present. The old plaintext key
+  /// is removed only after the secure write succeeds. Safe to call
+  /// repeatedly — a no-op once migrated.
+  static Future<void> _migrateLegacyPinIfNeeded() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_key);
+    final legacyPin = prefs.getString(_legacyPlaintextKey);
+    if (legacyPin == null) return;
+    await _storage.write(key: _secureHashKey, value: _hashPin(legacyPin));
+    await prefs.remove(_legacyPlaintextKey);
+  }
+
+  /// Whether a PIN is currently set.
+  static Future<bool> hasPin() async {
+    await _migrateLegacyPinIfNeeded();
+    final hash = await _storage.read(key: _secureHashKey);
+    return hash != null;
   }
 
   static Future<void> setPin(String pin) async {
+    await _storage.write(key: _secureHashKey, value: _hashPin(pin));
+    // A freshly-set PIN supersedes any not-yet-migrated legacy value.
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, pin);
+    await prefs.remove(_legacyPlaintextKey);
+  }
+
+  /// Compares [candidate] against the stored derived PIN value. Never
+  /// exposes or logs the stored or entered PIN.
+  static Future<bool> verifyPin(String candidate) async {
+    await _migrateLegacyPinIfNeeded();
+    final hash = await _storage.read(key: _secureHashKey);
+    if (hash == null) return false;
+    return hash == _hashPin(candidate);
   }
 
   static Future<void> deletePin() async {
+    await _storage.delete(key: _secureHashKey);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
+    await prefs.remove(_legacyPlaintextKey);
   }
 
   static Future<bool> isBiometricEnabled() async {
@@ -48,12 +89,8 @@ class PinService {
     try {
       final result = await _localAuth.authenticate(
         localizedReason: reason,
-        options: const AuthenticationOptions(
-          stickyAuth: true,
-          biometricOnly: true,
-        ),
+        options: const AuthenticationOptions(stickyAuth: true, biometricOnly: true),
       );
-      // Slight delay to ensure app lifecycle resumes before clearing the flag
       await Future.delayed(const Duration(milliseconds: 500));
       isAuthenticating = false;
       return result;

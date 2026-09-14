@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:money_app_flutter/core/utils/merchant_pattern_detector.dart';
+import 'package:money_app_flutter/core/utils/spending_anomaly.dart';
 import 'package:money_app_flutter/domain/models/transaction.dart' as tx;
 
 tx.Transaction _tx({
@@ -134,6 +135,40 @@ void main() {
       final patterns = detectMerchantPatterns(
           currentMonthTx: const [], allEligibleTx: allEligibleTx);
       expect(patterns, isEmpty);
+    });
+  });
+
+  group('recurring — historical-month future-data cutoff', () {
+    // June/July/August Netflix RM55, as in the bug report: viewing June
+    // Insights must not use July/August transactions to conclude Netflix
+    // was already recurring — only transactions up to the end of the
+    // selected month may be passed to allEligibleTx.
+    final netflix = [
+      _tx(amount: 55, date: DateTime(2026, 6, 5), note: 'Netflix — Sub'),
+      _tx(amount: 55, date: DateTime(2026, 7, 4), note: 'Netflix — Sub'),
+      _tx(amount: 55, date: DateTime(2026, 8, 5), note: 'Netflix — Sub'),
+    ];
+
+    test('does not flag recurring when viewing June (only 1 charge known yet)',
+        () {
+      final upToJune = eligibleExpensesUpToMonth(netflix, DateTime(2026, 6, 1));
+      final patterns = detectMerchantPatterns(
+          currentMonthTx: const [], allEligibleTx: upToJune);
+
+      expect(patterns.where((p) => p.type == MerchantPatternType.recurring),
+          isEmpty);
+    });
+
+    test('flags recurring once viewing August (all 3 charges known)', () {
+      final upToAugust =
+          eligibleExpensesUpToMonth(netflix, DateTime(2026, 8, 1));
+      final patterns = detectMerchantPatterns(
+          currentMonthTx: const [], allEligibleTx: upToAugust);
+
+      final recurring =
+          patterns.where((p) => p.type == MerchantPatternType.recurring);
+      expect(recurring, hasLength(1));
+      expect(recurring.single.count, 3);
     });
   });
 }

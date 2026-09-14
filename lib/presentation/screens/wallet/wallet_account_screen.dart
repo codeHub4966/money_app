@@ -61,6 +61,17 @@ class WalletAccountScreen extends ConsumerWidget {
                 onPressed: () => context.push('/add-wallet', extra: {'id': id, 'name': currentName, 'type': currentType, 'balance': currentBalance, 'includeInTotal': currentIncludeInTotal})),
             IconButton(icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFF9EA3B8)),
                 onPressed: () async {
+                  final walletRepo = ref.read(walletRepositoryProvider);
+                  final inUse = await walletRepo.isReferencedByTransactions(id);
+                  if (inUse) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content: Text(
+                              'This wallet cannot be deleted because it still has transactions.')));
+                    }
+                    return;
+                  }
+                  if (!context.mounted) return;
                   final confirm = await showDialog<bool>(context: context,
                     builder: (_) => AlertDialog(
                       title: const Text('Delete Wallet'),
@@ -71,7 +82,7 @@ class WalletAccountScreen extends ConsumerWidget {
                       ],
                     ));
                   if (confirm == true) {
-                    await ref.read(walletRepositoryProvider).delete(id);
+                    await walletRepo.delete(id);
                     if (context.mounted) context.pop();
                   }
                 }),

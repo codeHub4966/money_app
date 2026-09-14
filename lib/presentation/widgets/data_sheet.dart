@@ -25,9 +25,7 @@ class _DataSheetState extends ConsumerState<DataSheet> {
     try {
       if (widget.isImport) {
         final summary = await BackupService.importBackup(
-          txRepo: ref.read(transactionRepositoryProvider),
-          walletRepo: ref.read(walletRepositoryProvider),
-          budgetRepo: ref.read(budgetRepositoryProvider),
+          db: ref.read(appDatabaseProvider),
         );
         // Reload categories from prefs into the notifier
         ref.read(categoriesProvider.notifier).reloadFromPrefs();
@@ -107,8 +105,8 @@ class _DataSheetState extends ConsumerState<DataSheet> {
                   const SizedBox(height: 4),
                   Text(
                     widget.isImport
-                        ? 'Select a .json backup file. Your existing data will be merged with the imported data.'
-                        : 'Exports a .json file containing all your transactions, wallets, budgets, categories, and settings. Share or save it to restore later.',
+                        ? 'Select a .json backup file. This will REPLACE your existing transactions, wallets, budgets, categories and settings — this cannot be undone.'
+                        : 'Exports a .json file containing all your transactions, wallets, budgets, categories, receipts, and settings. Share or save it to restore later.',
                     style: const TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant, height: 1.4),
                   ),
                 ])),

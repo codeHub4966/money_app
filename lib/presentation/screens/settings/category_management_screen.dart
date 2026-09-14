@@ -52,7 +52,7 @@ class _CategoryManagementScreenState
           TextButton(
             onPressed: () async {
               try {
-                await ref.read(categoriesProvider.notifier).remove(_type, cat.id, ref);
+                await ref.read(categoriesProvider.notifier).remove(_type, cat, ref);
                 if (mounted) Navigator.pop(ctx);
               } catch (e) {
                 if (mounted) {

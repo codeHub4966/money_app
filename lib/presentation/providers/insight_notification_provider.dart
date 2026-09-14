@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -47,6 +48,30 @@ const _kNextDaySummaryTargetKey = 'next_day_summary_target';
 const _kNextDaySummarySigKey = 'next_day_summary_sig';
 const _kSixPmDigestTargetKey = 'six_pm_digest_target';
 const _kSixPmDigestSigKey = 'six_pm_digest_sig';
+
+/// Loads the persisted signature -> content-signature map for a Tier A
+/// notification family (unusual spending / budget risk / category
+/// overspending) under [key]. Each entry means "a notification identified by
+/// this signature is currently scheduled with this content" — comparing the
+/// stored content signature against a fresh recalculation is what lets a
+/// changed insight (e.g. the amount/percentage shifted after a transaction
+/// edit) be detected and rescheduled instead of silently left stale.
+Map<String, String> _loadSignatureContentMap(
+    SharedPreferences prefs, String key) {
+  final raw = prefs.getString(key);
+  if (raw == null) return {};
+  try {
+    final decoded = jsonDecode(raw) as Map<String, dynamic>;
+    return decoded.map((k, v) => MapEntry(k, v as String));
+  } catch (_) {
+    return {};
+  }
+}
+
+Future<void> _saveSignatureContentMap(
+    SharedPreferences prefs, String key, Map<String, String> map) {
+  return prefs.setString(key, jsonEncode(map));
+}
 
 /// Watches [transactionsProvider] for the lifetime of the app and, whenever
 /// the app is unlocked, checks for new unusual-spending days and updated
@@ -159,7 +184,7 @@ Future<void> clearInsightNotificationState() async {
   for (final prefix in signaturePrefixes) {
     final keys = prefs.getKeys().where((k) => k.startsWith(prefix)).toList();
     for (final key in keys) {
-      for (final sig in prefs.getStringList(key) ?? const <String>[]) {
+      for (final sig in _loadSignatureContentMap(prefs, key).keys) {
         await notifications
             .cancelInsightNotification(sig.hashCode & 0x7fffffff);
       }
@@ -202,54 +227,67 @@ class SpikeNotificationToSchedule {
   final String title;
   final String body;
   final DateTime scheduledDate;
+  final String signature;
   const SpikeNotificationToSchedule({
     required this.id,
     required this.title,
     required this.body,
     required this.scheduledDate,
+    required this.signature,
   });
 }
 
-/// Pure decision logic for requirement 2 (delayed unusual-spending alerts).
+/// Pure decision logic for requirement 2 (delayed unusual-spending alerts)
+/// and for keeping a still-pending alert's content fresh.
 ///
-/// Compares [snapshot]'s spikes against [alreadyScheduled] (spike-date
-/// signatures already scheduled this month) and returns the ones that are
-/// new, each due [kUnusualSpendingDelay] after [now], plus the signature set
-/// updated to include them. Callers are responsible for actually scheduling
-/// the notifications and persisting the updated signatures — this function
-/// has no side effects, which is what makes the 3-minute delay and the
-/// duplicate-prevention rule independently testable.
+/// [alreadyScheduled] maps each previously-scheduled signature to the
+/// content (here, the notification body) it was last scheduled with.
+/// Compares that against [snapshot]'s current spikes and returns, for each
+/// signature that is either brand new or whose content has changed since it
+/// was scheduled, a notification due [kUnusualSpendingDelay] after [now] —
+/// reusing the same id (derived from the signature) for a changed one, so
+/// scheduling it again simply replaces whatever was pending. A signature
+/// whose content is unchanged is left alone (no duplicate). The returned
+/// [NewSpikesToSchedule.updatedEntries] map is what callers should persist.
+/// This function has no side effects, which is what makes the 3-minute
+/// delay, duplicate-prevention, and content-change rules independently
+/// testable.
 class NewSpikesToSchedule {
   final List<SpikeNotificationToSchedule> notifications;
-  final Set<String> updatedSignatures;
+  final Map<String, String> updatedEntries;
   const NewSpikesToSchedule(
-      {required this.notifications, required this.updatedSignatures});
+      {required this.notifications, required this.updatedEntries});
 }
 
 NewSpikesToSchedule computeNewSpikesToSchedule({
   required SpendingSnapshot snapshot,
-  required Set<String> alreadyScheduled,
+  required Map<String, String> alreadyScheduled,
   required DateTime now,
 }) {
-  final seen = {...alreadyScheduled};
+  final updated = {...alreadyScheduled};
   final toSchedule = <SpikeNotificationToSchedule>[];
 
   for (final s in snapshot.spikes) {
     final sig = s.date.toIso8601String().substring(0, 10);
-    if (!seen.add(sig)) continue;
-    final multiplier = snapshot.avgDay > 0 ? s.amount / snapshot.avgDay : 0.0;
+    final multiplier = snapshot.avgNonZeroDay > 0
+        ? s.amount / snapshot.avgNonZeroDay
+        : 0.0;
+    final body =
+        '${_dowLabel(s.date)}, ${s.date.day} ${_monthNames[s.date.month - 1]} — ${_rm(s.amount)}, '
+        'about ${multiplier.toStringAsFixed(1)}x your average. Mostly ${s.topCategory.toLowerCase()}.';
+    if (updated[sig] == body) continue; // unchanged — no duplicate
+    updated[sig] = body;
     toSchedule.add(SpikeNotificationToSchedule(
       id: sig.hashCode & 0x7fffffff,
       title: 'Unusual spending detected',
-      body:
-          '${_dowLabel(s.date)}, ${s.date.day} ${_monthNames[s.date.month - 1]} — ${_rm(s.amount)}, '
-          'about ${multiplier.toStringAsFixed(1)}x your average. Mostly ${s.topCategory.toLowerCase()}.',
+      body: body,
       scheduledDate: now.add(kUnusualSpendingDelay),
+      signature: sig,
     ));
   }
 
   return NewSpikesToSchedule(
-      notifications: toSchedule, updatedSignatures: seen);
+      notifications: toSchedule, updatedEntries: updated);
 }
 
 /// Signatures that were previously scheduled but are no longer present in
@@ -266,11 +304,14 @@ Set<String> staleSignaturesToCancel({
 
 // Unusual-spending alerts aren't shown the moment they're detected — they're
 // silently scheduled ~3 minutes later so the user isn't interrupted mid-entry.
-// Signatures are recorded as soon as a spike is scheduled (not when it later
-// fires) so re-running this on the next transaction change never re-schedules
-// the same day twice. Any previously-scheduled day that's no longer flagged
-// (e.g. the spike's transaction was edited/deleted) has its pending
-// notification cancelled instead of being left to fire.
+// Signatures (and the content they were scheduled with) are recorded as soon
+// as a spike is scheduled (not when it later fires) so re-running this on
+// the next transaction change never re-schedules unchanged content. Any
+// previously-scheduled day that's no longer flagged (e.g. the spike's
+// transaction was edited/deleted) has its pending notification cancelled
+// instead of being left to fire; a day whose content changed (e.g. the
+// amount moved because the transaction was edited) is rescheduled under the
+// same id with a fresh ~3-minute delay instead of being left stale.
 Future<void> _scheduleNewSpikes(
   NotificationService notifications,
   SharedPreferences prefs,
@@ -278,17 +319,17 @@ Future<void> _scheduleNewSpikes(
   SpendingSnapshot snapshot,
 ) async {
   final key = 'notified_spikes_$monthKey';
-  final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+  final seen = _loadSignatureContentMap(prefs, key);
 
   final currentSignatures = snapshot.spikes
       .map((s) => s.date.toIso8601String().substring(0, 10))
       .toSet();
   final stale = staleSignaturesToCancel(
-      alreadyScheduled: seen, currentSignatures: currentSignatures);
+      alreadyScheduled: seen.keys.toSet(), currentSignatures: currentSignatures);
   for (final sig in stale) {
     await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
   }
-  seen.removeAll(stale);
+  seen.removeWhere((sig, _) => stale.contains(sig));
 
   final result = computeNewSpikesToSchedule(
       snapshot: snapshot, alreadyScheduled: seen, now: DateTime.now());
@@ -302,7 +343,7 @@ Future<void> _scheduleNewSpikes(
   }
 
   if (result.notifications.isNotEmpty || stale.isNotEmpty) {
-    await prefs.setStringList(key, result.updatedSignatures.toList());
+    await _saveSignatureContentMap(prefs, key, result.updatedEntries);
   }
 }
 
@@ -324,42 +365,46 @@ class BudgetRiskNotificationToSchedule {
 
 class NewBudgetRisksToSchedule {
   final List<BudgetRiskNotificationToSchedule> notifications;
-  final Set<String> updatedSignatures;
+  final Map<String, String> updatedEntries;
   const NewBudgetRisksToSchedule(
-      {required this.notifications, required this.updatedSignatures});
+      {required this.notifications, required this.updatedEntries});
 }
 
 String _budgetRiskSignature(String category) => 'budget_risk:$category';
 
 /// Pure decision logic for the budget-risk tier (Tier A, ~3 min delay):
 /// mirrors [computeNewSpikesToSchedule] — keyed by category rather than by
-/// day, since a budget risk is a per-category-per-month concept.
+/// day, since a budget risk is a per-category-per-month concept. Also
+/// mirrors its content-change handling: a still-current risk whose overage
+/// amount/exceed-date text changed is rescheduled under the same id.
 NewBudgetRisksToSchedule computeNewBudgetRisksToSchedule({
   required List<BudgetRisk> risks,
-  required Set<String> alreadyScheduled,
+  required Map<String, String> alreadyScheduled,
   required DateTime now,
 }) {
-  final seen = {...alreadyScheduled};
+  final updated = {...alreadyScheduled};
   final toSchedule = <BudgetRiskNotificationToSchedule>[];
 
   for (final r in risks) {
     final sig = _budgetRiskSignature(r.category);
-    if (!seen.add(sig)) continue;
     final dateSuffix = r.exceedDate != null
         ? ', around ${_dowLabel(r.exceedDate!)} ${r.exceedDate!.day} ${_monthNames[r.exceedDate!.month - 1]}'
         : '';
+    final body =
+        '${r.category} may exceed its budget by ${_rm(r.overageAmount)} this month$dateSuffix.';
+    if (updated[sig] == body) continue; // unchanged — no duplicate
+    updated[sig] = body;
     toSchedule.add(BudgetRiskNotificationToSchedule(
       id: sig.hashCode & 0x7fffffff,
       title: 'Budget risk',
-      body:
-          '${r.category} may exceed its budget by ${_rm(r.overageAmount)} this month$dateSuffix.',
+      body: body,
       scheduledDate: now.add(kUnusualSpendingDelay),
       signature: sig,
     ));
   }
 
   return NewBudgetRisksToSchedule(
-      notifications: toSchedule, updatedSignatures: seen);
+      notifications: toSchedule, updatedEntries: updated);
 }
 
 Future<void> _scheduleNewBudgetRisks(
@@ -369,17 +414,17 @@ Future<void> _scheduleNewBudgetRisks(
   SpendingSnapshot snapshot,
 ) async {
   final key = 'notified_budget_risk_$monthKey';
-  final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+  final seen = _loadSignatureContentMap(prefs, key);
 
   final currentSignatures = snapshot.budgetRisks
       .map((r) => _budgetRiskSignature(r.category))
       .toSet();
   final stale = staleSignaturesToCancel(
-      alreadyScheduled: seen, currentSignatures: currentSignatures);
+      alreadyScheduled: seen.keys.toSet(), currentSignatures: currentSignatures);
   for (final sig in stale) {
     await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
   }
-  seen.removeAll(stale);
+  seen.removeWhere((sig, _) => stale.contains(sig));
 
   final result = computeNewBudgetRisksToSchedule(
       risks: snapshot.budgetRisks, alreadyScheduled: seen, now: DateTime.now());
@@ -393,7 +438,7 @@ Future<void> _scheduleNewBudgetRisks(
   }
 
   if (result.notifications.isNotEmpty || stale.isNotEmpty) {
-    await prefs.setStringList(key, result.updatedSignatures.toList());
+    await _saveSignatureContentMap(prefs, key, result.updatedEntries);
   }
 }
 
@@ -416,39 +461,42 @@ class CategoryOverspendNotificationToSchedule {
 
 class NewCategoryOverspendToSchedule {
   final List<CategoryOverspendNotificationToSchedule> notifications;
-  final Set<String> updatedSignatures;
+  final Map<String, String> updatedEntries;
   const NewCategoryOverspendToSchedule(
-      {required this.notifications, required this.updatedSignatures});
+      {required this.notifications, required this.updatedEntries});
 }
 
 String _overspendSignature(String category) => 'overspend:$category';
 
 /// Pure decision logic for the significant-category-overspending tier
 /// (Tier A, ~3 min delay): mirrors [computeNewSpikesToSchedule], keyed by
-/// category.
+/// category, including rescheduling a still-current overspend under the
+/// same id when its percentage/text changes.
 NewCategoryOverspendToSchedule computeNewCategoryOverspendToSchedule({
   required List<CategoryOverspend> overspends,
-  required Set<String> alreadyScheduled,
+  required Map<String, String> alreadyScheduled,
   required DateTime now,
 }) {
-  final seen = {...alreadyScheduled};
+  final updated = {...alreadyScheduled};
   final toSchedule = <CategoryOverspendNotificationToSchedule>[];
 
   for (final o in overspends) {
     final sig = _overspendSignature(o.category);
-    if (!seen.add(sig)) continue;
+    final body =
+        '${o.category} spending is ${o.pctIncrease.round()}% higher than this time last month.';
+    if (updated[sig] == body) continue; // unchanged — no duplicate
+    updated[sig] = body;
     toSchedule.add(CategoryOverspendNotificationToSchedule(
       id: sig.hashCode & 0x7fffffff,
       title: 'Category spending up',
-      body:
-          '${o.category} spending is ${o.pctIncrease.round()}% higher than this time last month.',
+      body: body,
       scheduledDate: now.add(kUnusualSpendingDelay),
       signature: sig,
     ));
   }
 
   return NewCategoryOverspendToSchedule(
-      notifications: toSchedule, updatedSignatures: seen);
+      notifications: toSchedule, updatedEntries: updated);
 }
 
 Future<void> _scheduleNewCategoryOverspend(
@@ -458,17 +506,17 @@ Future<void> _scheduleNewCategoryOverspend(
   SpendingSnapshot snapshot,
 ) async {
   final key = 'notified_overspend_$monthKey';
-  final seen = (prefs.getStringList(key) ?? <String>[]).toSet();
+  final seen = _loadSignatureContentMap(prefs, key);
 
   final currentSignatures = snapshot.categoryOverspends
       .map((o) => _overspendSignature(o.category))
       .toSet();
   final stale = staleSignaturesToCancel(
-      alreadyScheduled: seen, currentSignatures: currentSignatures);
+      alreadyScheduled: seen.keys.toSet(), currentSignatures: currentSignatures);
   for (final sig in stale) {
     await notifications.cancelInsightNotification(sig.hashCode & 0x7fffffff);
   }
-  seen.removeAll(stale);
+  seen.removeWhere((sig, _) => stale.contains(sig));
 
   final result = computeNewCategoryOverspendToSchedule(
       overspends: snapshot.categoryOverspends,
@@ -484,7 +532,7 @@ Future<void> _scheduleNewCategoryOverspend(
   }
 
   if (result.notifications.isNotEmpty || stale.isNotEmpty) {
-    await prefs.setStringList(key, result.updatedSignatures.toList());
+    await _saveSignatureContentMap(prefs, key, result.updatedEntries);
   }
 }
 

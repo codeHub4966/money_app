@@ -145,4 +145,47 @@ void main() {
           isFalse);
     });
   });
+
+  group('eligibleExpensesUpToMonth (historical-month future-data cutoff)', () {
+    test('excludes transactions dated after the given month', () {
+      final all = [
+        _tx(amount: 55, date: DateTime(2026, 6, 5)), // June
+        _tx(amount: 55, date: DateTime(2026, 7, 4)), // July
+        _tx(amount: 55, date: DateTime(2026, 8, 5)), // August
+      ];
+
+      final upToJune = eligibleExpensesUpToMonth(all, DateTime(2026, 6, 1));
+
+      expect(upToJune, hasLength(1));
+      expect(upToJune.single.date, DateTime(2026, 6, 5));
+    });
+
+    test('includes transactions dated in or before the given month', () {
+      final all = [
+        _tx(amount: 55, date: DateTime(2026, 6, 5)),
+        _tx(amount: 55, date: DateTime(2026, 7, 4)),
+      ];
+
+      final upToJuly = eligibleExpensesUpToMonth(all, DateTime(2026, 7, 1));
+
+      expect(upToJuly, hasLength(2));
+    });
+
+    test('still excludes Transfer/Balance Adjustment/income regardless of date',
+        () {
+      final all = [
+        _tx(amount: 55, date: DateTime(2026, 6, 5), category: 'Transfer'),
+        _tx(
+            amount: 55,
+            date: DateTime(2026, 6, 6),
+            category: 'Balance Adjustment'),
+        _tx(
+            amount: 55,
+            date: DateTime(2026, 6, 7),
+            type: TransactionType.income),
+      ];
+
+      expect(eligibleExpensesUpToMonth(all, DateTime(2026, 6, 1)), isEmpty);
+    });
+  });
 }

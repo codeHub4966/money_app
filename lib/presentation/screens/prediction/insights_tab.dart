@@ -9,6 +9,7 @@ import '../../../core/utils/merchant_pattern_detector.dart';
 import '../../../core/utils/saving_opportunity_detector.dart';
 import '../../../core/utils/spending_anomaly.dart';
 import '../../../core/utils/spending_forecast_calculator.dart';
+import '../../../core/utils/weekly_trend.dart';
 import '../../../domain/models/app_category.dart';
 import '../../../domain/models/budget.dart' as bg;
 import '../../../domain/models/transaction.dart' as tx;
@@ -81,15 +82,14 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
         : bars.lastIndexWhere((b) => !b.future).clamp(0, bars.length - 1);
     final sel = bars[selIdx];
     final maxV = bars.map((b) => b.value).fold(0.0, max);
+    // Weekly view: only completed weeks count toward the average line — an
+    // in-progress week is still shown as a bar but would understate the
+    // average if included, and if no week has finished yet there's nothing
+    // reliable to average, so the line is omitted entirely (null).
     final avgForView = _trendView == 'daily'
         ? data.avgDay
-        : (() {
-            final recorded = bars.where((b) => !b.future).toList();
-            return recorded.isEmpty
-                ? 0.0
-                : recorded.map((b) => b.value).reduce((a, b) => a + b) /
-                    recorded.length;
-          })();
+        : computeCompletedWeeksAverage(
+            bucketIntoWeeks(data.dailyFull, data.daysElapsed));
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
@@ -292,11 +292,15 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
   // ─────────────────────────── Spending trend card ───────────────────────────
 
   Widget _buildTrendCard(_MonthData data, List<_Bar> bars, _Bar sel, int selIdx,
-      double maxV, double avgForView) {
+      double maxV, double? avgForView) {
     final tag = sel.value >= maxV - 0.001
         ? (_trendView == 'daily' ? 'HIGHEST DAY' : 'HIGHEST WEEK')
-        : (sel.value > avgForView ? 'ABOVE AVERAGE' : 'BELOW AVERAGE');
-    final tagInk = sel.value > avgForView ? _bad : _good;
+        : (avgForView == null
+            ? ''
+            : (sel.value > avgForView ? 'ABOVE AVERAGE' : 'BELOW AVERAGE'));
+    final tagInk = avgForView == null
+        ? AppTheme.onSurfaceVariant
+        : (sel.value > avgForView ? _bad : _good);
     final barMax = max(maxV * 1.15, 1.0);
 
     return _card(
@@ -347,13 +351,15 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
       SizedBox(
         height: 118,
         child: Stack(children: [
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 118 - 8 - (avgForView / barMax * 100).clamp(0, 100),
-            child: CustomPaint(
-                size: const Size(double.infinity, 1), painter: _DashedHLine()),
-          ),
+          if (avgForView != null)
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 118 - 8 - (avgForView / barMax * 100).clamp(0, 100),
+              child: CustomPaint(
+                  size: const Size(double.infinity, 1),
+                  painter: _DashedHLine()),
+            ),
           Positioned.fill(
             bottom: 8,
             child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
@@ -375,7 +381,8 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
                             decoration: BoxDecoration(
                               color: bars[i].future
                                   ? const Color(0xFFDFE2EC)
-                                  : (bars[i].value >= avgForView * 2
+                                  : (avgForView != null &&
+                                          bars[i].value >= avgForView * 2
                                       ? _bad
                                       : (i == selIdx
                                           ? AppTheme.secondary
@@ -748,7 +755,8 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
 
   Widget _spikeAlertCard(
       _Spike s, _MonthData data, Map<String, List<AppCategory>> allCats) {
-    final multiplier = data.avgDay > 0 ? s.amount / data.avgDay : 0.0;
+    final multiplier =
+        data.avgNonZeroDay > 0 ? s.amount / data.avgNonZeroDay : 0.0;
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 2),
       padding: const EdgeInsets.all(18),
@@ -849,7 +857,7 @@ class _InsightsTabState extends ConsumerState<InsightsTab> {
             ]),
             const SizedBox(height: 12),
             Text(
-              'You spent ${rm(s.amount)} on this day, which is ${multiplier.toStringAsFixed(1)}× above your average (${rm(data.avgDay)}).',
+              'You spent ${rm(s.amount)} on this day, which is ${multiplier.toStringAsFixed(1)}× above your average (${rm(data.avgNonZeroDay)}).',
               style: const TextStyle(
                   fontSize: 10.5,
                   fontWeight: FontWeight.w600,
@@ -939,11 +947,16 @@ class _Bar {
   final String axisLabel;
   final double value;
   final bool future;
+  // Weekly view only: true for the week currently in progress (started but
+  // not yet finished) — still shown as a bar, but excluded from the weekly
+  // average line so an incomplete week can't drag it down.
+  final bool partial;
   const _Bar(
       {required this.label,
       required this.axisLabel,
       required this.value,
-      required this.future});
+      required this.future,
+      this.partial = false});
 }
 
 class _Forecast {
@@ -1017,6 +1030,7 @@ class _MonthData {
   final List<double> dailyFull; // length daysInMonth
   final double spent;
   final double avgDay;
+  final double avgNonZeroDay;
   final int highestDayNum;
   final double highestDay;
   final double? pacePct, paceNow, paceBefore;
@@ -1038,6 +1052,7 @@ class _MonthData {
     required this.dailyFull,
     required this.spent,
     required this.avgDay,
+    required this.avgNonZeroDay,
     required this.highestDayNum,
     required this.highestDay,
     this.pacePct,
@@ -1067,25 +1082,19 @@ class _MonthData {
   }
 
   List<_Bar> weeklyBars() {
-    final bars = <_Bar>[];
-    var start = 0, idx = 0;
-    while (start < daysInMonth) {
-      final end = min(start + 7, daysInMonth);
-      final v = dailyFull.sublist(start, end).fold(0.0, (s, x) => s + x);
-      final future = start >= daysElapsed;
-      final partial = start < daysElapsed && end > daysElapsed;
-      bars.add(_Bar(
-        label: partial
-            ? 'Week ${idx + 1} · in progress'
-            : 'Week ${idx + 1} · ${start + 1}–$end ${kMonthNames[month.month - 1]}',
-        axisLabel: 'W${idx + 1}',
-        value: v,
-        future: future,
-      ));
-      start = end;
-      idx++;
-    }
-    return bars;
+    final weeks = bucketIntoWeeks(dailyFull, daysElapsed);
+    return [
+      for (var i = 0; i < weeks.length; i++)
+        _Bar(
+          label: weeks[i].partial
+              ? 'Week ${i + 1} · in progress'
+              : 'Week ${i + 1} · ${weeks[i].startDay}–${weeks[i].endDay} ${kMonthNames[month.month - 1]}',
+          axisLabel: 'W${i + 1}',
+          value: weeks[i].total,
+          future: weeks[i].future,
+          partial: weeks[i].partial,
+        ),
+    ];
   }
 
   static double _monthTotalToDay(
@@ -1127,6 +1136,7 @@ class _MonthData {
           dailyFull: dailyFull,
           spent: 0,
           avgDay: 0,
+          avgNonZeroDay: 0,
           highestDayNum: 1,
           highestDay: 0,
           momMonths: const [],
@@ -1139,6 +1149,10 @@ class _MonthData {
     // Non-zero spending days (separate from avgDay's divisor) only used to
     // gate the forecast card's "limited data" caption below.
     final nonZeroDays = recorded.where((v) => v > 0).length;
+    // Average of only the days with recorded spending ("your normal spending
+    // day") — used for the unusual-spending multiplier, not the headline
+    // AVERAGE / DAY stat (which stays calendar-day based).
+    final avgNonZeroDay = computeAvgPerNonZeroDay(recorded);
 
     var hiDay = 1;
     var hiV = 0.0;
@@ -1309,8 +1323,9 @@ class _MonthData {
             daysInMonth: daysInMonth,
           )
         : const <BudgetRisk>[];
-    if (budgetRisks.isNotEmpty) {
-      final r = budgetRisks.first;
+    // Show up to the top 3 (detector-sorted) budget risks rather than
+    // hiding every category but the worst one.
+    for (final r in budgetRisks.take(3)) {
       final dateSuffix = r.exceedDate != null
           ? ', around ${_dowLabel(r.exceedDate!)} ${r.exceedDate!.day} ${kMonthNames[r.exceedDate!.month - 1]}'
           : '';
@@ -1329,8 +1344,9 @@ class _MonthData {
       previousMonthTx: prevMonthTx,
       daysElapsed: daysElapsed,
     );
-    if (categoryOverspends.isNotEmpty) {
-      final o = categoryOverspends.first;
+    // Show up to the top 3 (detector-sorted) category overspends rather
+    // than hiding every category but the worst one.
+    for (final o in categoryOverspends.take(3)) {
       insights.add(_Insight(
         icon: Icons.trending_up_rounded,
         alert: true,
@@ -1346,7 +1362,7 @@ class _MonthData {
         icon: Icons.priority_high_rounded,
         alert: true,
         text:
-            '${_dowLabel(s.date)}, ${s.date.day} ${kMonthNames[s.date.month - 1]} was an unusual day at ${rm(s.amount)}, about ${(s.amount / avgDay).toStringAsFixed(1)}× your normal daily spending.',
+            '${_dowLabel(s.date)}, ${s.date.day} ${kMonthNames[s.date.month - 1]} was an unusual day at ${rm(s.amount)}, about ${(avgNonZeroDay > 0 ? s.amount / avgNonZeroDay : 0.0).toStringAsFixed(1)}× your normal spending day.',
         rule:
             'ABOVE THE ${rm(anomalyThreshold!.upperThreshold)} UNUSUAL-DAY THRESHOLD',
       ));
@@ -1386,8 +1402,11 @@ class _MonthData {
       ));
     }
     // Merchant repeated/recurring spending patterns (merchant-identified
-    // only, category is never used to detect these).
-    final allEligibleTx = all.where(isEligibleExpense).toList();
+    // only, category is never used to detect these). Recurring detection
+    // must never see transactions after the month being viewed — otherwise
+    // a historical month would look "recurring" only because of spending
+    // that hadn't happened yet at that point in time.
+    final allEligibleTx = eligibleExpensesUpToMonth(all, month);
     final merchantPatterns = detectMerchantPatterns(
       currentMonthTx: monthTx,
       allEligibleTx: allEligibleTx,
@@ -1439,6 +1458,7 @@ class _MonthData {
       dailyFull: dailyFull,
       spent: spent,
       avgDay: avgDay,
+      avgNonZeroDay: avgNonZeroDay,
       highestDayNum: hiDay,
       highestDay: hiV,
       pacePct: pacePct,

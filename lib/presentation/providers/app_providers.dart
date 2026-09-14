@@ -5,6 +5,7 @@ import '../../data/local/app_database.dart';
 import '../../data/repositories/transaction_repository.dart';
 import '../../data/repositories/wallet_repository.dart';
 import '../../data/repositories/budget_repository.dart';
+import '../../data/repositories/transaction_wallet_service.dart';
 import '../../domain/models/transaction.dart' as tx;
 import '../../domain/models/wallet.dart' as wl;
 import '../../domain/models/budget.dart' as bg;
@@ -32,6 +33,10 @@ final walletRepositoryProvider = Provider<IWalletRepository>((ref) {
 
 final budgetRepositoryProvider = Provider<IBudgetRepository>((ref) {
   return LocalBudgetRepository(ref.watch(appDatabaseProvider));
+});
+
+final transactionWalletServiceProvider = Provider<TransactionWalletService>((ref) {
+  return TransactionWalletService(ref.watch(appDatabaseProvider));
 });
 
 final transactionsProvider = StreamProvider<List<tx.Transaction>>((ref) {
@@ -154,22 +159,23 @@ class CategoryNotifier extends StateNotifier<Map<String, List<AppCategory>>> {
 
   Future<void> reloadFromPrefs() => _load();
 
-  Future<void> remove(String type, String id, WidgetRef ref) async {
-    // Check if category is in use
+  Future<void> remove(String type, AppCategory cat, WidgetRef ref) async {
+    // Transactions/budgets store the category label (e.g. "Groceries"), not
+    // its id (e.g. "goods") — compare against the label, case-insensitively.
     final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
     final budgets = ref.read(budgetsProvider).valueOrNull ?? [];
 
-    final isUsedInTransactions =
-        transactions.any((t) => t.category.toLowerCase() == id.toLowerCase());
-    final isUsedInBudgets =
-        budgets.any((b) => b.categoryName.toLowerCase() == id.toLowerCase());
+    final isUsedInTransactions = transactions
+        .any((t) => t.category.toLowerCase() == cat.label.toLowerCase());
+    final isUsedInBudgets = budgets
+        .any((b) => b.categoryName.toLowerCase() == cat.label.toLowerCase());
 
     if (isUsedInTransactions || isUsedInBudgets) {
       throw Exception(
           'Cannot delete category: it is currently in use by transactions or budgets');
     }
 
-    state = {...state, type: state[type]!.where((c) => c.id != id).toList()};
+    state = {...state, type: state[type]!.where((c) => c.id != cat.id).toList()};
     _persist();
   }
 

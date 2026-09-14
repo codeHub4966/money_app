@@ -108,5 +108,35 @@ void main() {
       expect(result[0].category, 'A');
       expect(result[1].category, 'B');
     });
+
+    test(
+        'returns every qualifying category (more than 3), sorted — the '
+        'detector itself never truncates; only the UI limits to the top 3',
+        () {
+      final current = [
+        _tx(amount: 400, date: DateTime(2026, 3, 5), category: 'A'), // +300%
+        _tx(amount: 200, date: DateTime(2026, 3, 5), category: 'B'), // +100%
+        _tx(amount: 260, date: DateTime(2026, 3, 5), category: 'C'), // +30%
+        _tx(amount: 130, date: DateTime(2026, 3, 5), category: 'D'), // +30%
+      ];
+      final previous = [
+        _tx(amount: 100, date: DateTime(2026, 2, 5), category: 'A'),
+        _tx(amount: 100, date: DateTime(2026, 2, 5), category: 'B'),
+        _tx(amount: 200, date: DateTime(2026, 2, 5), category: 'C'),
+        _tx(amount: 100, date: DateTime(2026, 2, 5), category: 'D'),
+      ];
+
+      final result = detectCategoryOverspending(
+        currentMonthTx: current,
+        previousMonthTx: previous,
+        daysElapsed: 10,
+      );
+
+      expect(result, hasLength(4));
+      expect(result[0].category, 'A');
+      expect(result[1].category, 'B');
+      // C and D tie at +30%; both must still be present.
+      expect(result.skip(2).map((r) => r.category).toSet(), {'C', 'D'});
+    });
   });
 }

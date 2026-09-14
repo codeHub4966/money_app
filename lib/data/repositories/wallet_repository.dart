@@ -7,6 +7,7 @@ abstract class IWalletRepository {
   Future<void> add(model.Wallet w);
   Future<void> delete(String id);
   Future<void> updateBalance(String id, double newBalance);
+  Future<bool> isReferencedByTransactions(String walletId);
 }
 
 class LocalWalletRepository implements IWalletRepository {
@@ -42,6 +43,15 @@ class LocalWalletRepository implements IWalletRepository {
   Future<void> updateBalance(String id, double newBalance) {
     return (_db.update(_db.wallets)..where((w) => w.id.equals(id)))
         .write(WalletsCompanion(balance: Value(newBalance)));
+  }
+
+  @override
+  Future<bool> isReferencedByTransactions(String walletId) async {
+    final row = await (_db.select(_db.transactions)
+          ..where((t) => t.accountId.equals(walletId))
+          ..limit(1))
+        .getSingleOrNull();
+    return row != null;
   }
 
   model.Wallet _toModel(Wallet row) => model.Wallet(

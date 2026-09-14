@@ -53,7 +53,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
     with WidgetsBindingObserver {
   bool _isUnlocked = false;
   bool _isLoading = true;
-  String? _savedPin;
+  bool _hasPin = false;
   bool _biometricEnabled = false;
   bool _canUseBio = false;
   final GlobalKey<PinScreenState> _pinKey = GlobalKey<PinScreenState>();
@@ -87,10 +87,10 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
   }
 
   Future<void> _lockIfRequired() async {
-    final pin = await PinService.getPin();
+    final hasPin = await PinService.hasPin();
     final bio = await PinService.isBiometricEnabled();
     final canUseBio = await PinService.canUseBiometric();
-    if (pin != null || (bio && canUseBio)) {
+    if (hasPin || (bio && canUseBio)) {
       if (mounted) {
         setState(() => _isUnlocked = false);
         ref.read(isAppUnlockedProvider.notifier).state = false;
@@ -99,14 +99,14 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
   }
 
   Future<void> _checkSecurity() async {
-    final pin = await PinService.getPin();
+    final hasPin = await PinService.hasPin();
     final bioEnabled = await PinService.isBiometricEnabled();
     final canUseBio = await PinService.canUseBiometric();
 
-    final requiresAuth = pin != null || (bioEnabled && canUseBio);
+    final requiresAuth = hasPin || (bioEnabled && canUseBio);
 
     setState(() {
-      _savedPin = pin;
+      _hasPin = hasPin;
       _biometricEnabled = bioEnabled;
       _canUseBio = canUseBio;
       _isLoading = false;
@@ -115,7 +115,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
     ref.read(isAppUnlockedProvider.notifier).state = _isUnlocked;
 
     // Auto-trigger biometric on launch if it's available and no PIN is set
-    if (!_isUnlocked && bioEnabled && canUseBio && pin == null) {
+    if (!_isUnlocked && bioEnabled && canUseBio && !hasPin) {
       _tryBiometric();
     }
   }
@@ -144,7 +144,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
     }
 
     // Biometric-only mode (no PIN set but biometric is enabled)
-    if (!_isUnlocked && _savedPin == null && _biometricEnabled && _canUseBio) {
+    if (!_isUnlocked && !_hasPin && _biometricEnabled && _canUseBio) {
       return MaterialApp(
         theme: AppTheme.light,
         debugShowCheckedModeBanner: false,
@@ -188,7 +188,7 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
     }
 
     // PIN (+ optional biometric) mode
-    if (!_isUnlocked && _savedPin != null) {
+    if (!_isUnlocked && _hasPin) {
       return MaterialApp(
         theme: AppTheme.light,
         debugShowCheckedModeBanner: false,
@@ -199,8 +199,9 @@ class _MoneyAppState extends ConsumerState<MoneyApp>
           showBackButton: false,
           showBiometricButton: _biometricEnabled && _canUseBio,
           onBiometricPressed: _tryBiometric,
-          onSuccess: (pin) {
-            if (pin == _savedPin) {
+          onSuccess: (pin) async {
+            final ok = await PinService.verifyPin(pin);
+            if (ok) {
               _unlock();
             } else {
               _pinKey.currentState?.showWrongPinError();

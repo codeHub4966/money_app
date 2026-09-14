@@ -2,8 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/budget_repository.dart';
 import '../../../domain/models/budget.dart';
 import '../../providers/app_providers.dart';
+
+/// True when [categoryLabel] is free to be assigned to a budget: either no
+/// budget currently uses it, or the only budget using it is the one being
+/// edited ([excludingBudgetId]), so it stays available while editing.
+bool isCategoryAvailableForBudget({
+  required String categoryLabel,
+  required List<Budget> existingBudgets,
+  String? excludingBudgetId,
+}) {
+  return !existingBudgets.any((b) =>
+      b.id != excludingBudgetId &&
+      b.categoryName.toLowerCase() == categoryLabel.toLowerCase());
+}
 
 class AddBudgetScreen extends ConsumerStatefulWidget {
   final String? initialId;
@@ -180,12 +194,19 @@ class _State extends ConsumerState<AddBudgetScreen> {
       return;
     }
     if (_selectedId == null) return;
-    await ref.read(budgetRepositoryProvider).add(Budget(
-      id: widget.initialId ?? DateTime.now().millisecondsSinceEpoch.toString(),
-      categoryName: _selectedId!, // stored as label
-      monthlyLimit: limit,
-      spent: 0,
-    ));
+    try {
+      await ref.read(budgetRepositoryProvider).add(Budget(
+        id: widget.initialId ?? DateTime.now().millisecondsSinceEpoch.toString(),
+        categoryName: _selectedId!, // stored as label
+        monthlyLimit: limit,
+        spent: 0,
+      ));
+    } on DuplicateBudgetCategoryException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+      }
+      return;
+    }
     if (mounted) context.pop();
   }
 
@@ -220,24 +241,32 @@ class _State extends ConsumerState<AddBudgetScreen> {
                 children: ref.watch(categoriesProvider)['expense']!.asMap().entries.map((entry) {
                   final cat = entry.value;
                   final selected = _selectedId == cat.label;
-                  return GestureDetector(
-                    onTap: () => setState(() => _selectedId = cat.label),
-                    child: Column(children: [
-                      Container(
-                        width: 64, height: 64,
-                        decoration: BoxDecoration(
-                          color: selected ? AppTheme.primary.withValues(alpha: 0.1) : AppTheme.surfaceContainerLow,
-                          borderRadius: BorderRadius.circular(18),
-                          border: selected ? Border.all(color: AppTheme.primary, width: 2) : null,
-                        ),
-                        child: Center(child: Text(cat.emoji, style: const TextStyle(fontSize: 28)))),
-                      const SizedBox(height: 6),
-                      Text(cat.label,
-                        textAlign: TextAlign.center,
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 11, fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                            color: selected ? AppTheme.primary : AppTheme.onSurfaceVariant)),
-                    ]),
+                  final available = isCategoryAvailableForBudget(
+                    categoryLabel: cat.label,
+                    existingBudgets: ref.watch(budgetsProvider).valueOrNull ?? [],
+                    excludingBudgetId: widget.initialId,
+                  );
+                  return Opacity(
+                    opacity: available ? 1 : 0.35,
+                    child: GestureDetector(
+                      onTap: available ? () => setState(() => _selectedId = cat.label) : null,
+                      child: Column(children: [
+                        Container(
+                          width: 64, height: 64,
+                          decoration: BoxDecoration(
+                            color: selected ? AppTheme.primary.withValues(alpha: 0.1) : AppTheme.surfaceContainerLow,
+                            borderRadius: BorderRadius.circular(18),
+                            border: selected ? Border.all(color: AppTheme.primary, width: 2) : null,
+                          ),
+                          child: Center(child: Text(cat.emoji, style: const TextStyle(fontSize: 28)))),
+                        const SizedBox(height: 6),
+                        Text(cat.label,
+                          textAlign: TextAlign.center,
+                          maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 11, fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                              color: selected ? AppTheme.primary : AppTheme.onSurfaceVariant)),
+                      ]),
+                    ),
                   );
                 }).toList(),
               ),

@@ -20,6 +20,22 @@ bool isEligibleExpense(tx.Transaction t) =>
     t.type == tx.TransactionType.expense &&
     !_excludedCategories.contains(t.category);
 
+/// All eligible expenses (see [isEligibleExpense]) dated on or before the
+/// last day of [month]. Used by detectors that scan multi-month history
+/// (recurring-merchant detection) when computing insights for a specific
+/// month being viewed, so a historical month never "sees" spending that
+/// hadn't happened yet at that point in time — e.g. viewing June must not
+/// use July/August transactions to conclude a merchant was already
+/// recurring. Viewing the current month is unaffected in practice, since
+/// there's normally no future-dated spending to exclude.
+List<tx.Transaction> eligibleExpensesUpToMonth(
+    List<tx.Transaction> all, DateTime month) {
+  final monthEndExclusive = DateTime(month.year, month.month + 1, 1);
+  return all
+      .where((t) => isEligibleExpense(t) && t.date.isBefore(monthEndExclusive))
+      .toList();
+}
+
 /// Q1/Q3/IQR and the resulting upper outlier threshold for a set of daily
 /// spending totals.
 class DailySpendingThreshold {

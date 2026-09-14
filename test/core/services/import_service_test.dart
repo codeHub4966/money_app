@@ -49,6 +49,9 @@ class FakeWalletRepository implements IWalletRepository {
       includeInTotal: items[i].includeInTotal,
     );
   }
+
+  @override
+  Future<bool> isReferencedByTransactions(String walletId) async => false;
 }
 
 Future<String?> _noFallback(List<Wallet> wallets) async => null;

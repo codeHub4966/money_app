@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/repositories/transaction_wallet_service.dart';
 import '../../../domain/models/wallet.dart';
 import '../../../domain/models/transaction.dart';
 import '../../providers/app_providers.dart';
@@ -251,37 +252,39 @@ class _State extends ConsumerState<TransferFundsScreen> {
       return;
     }
 
-    final walletRepo = ref.read(walletRepositoryProvider);
-    final txRepo = ref.read(transactionRepositoryProvider);
+    final txService = ref.read(transactionWalletServiceProvider);
     final now = DateTime.now();
     final note = _noteCtrl.text;
-
-    for (final u in updates) {
-      await walletRepo.updateBalance(u.walletId, u.balance);
-    }
 
     final outId = _outId ?? '${now.microsecondsSinceEpoch}_out';
     final inId = _inId ?? '${now.microsecondsSinceEpoch}_in';
     final date = _isEditing ? _date : now;
 
-    await txRepo.add(Transaction(
-      id: outId,
-      type: TransactionType.expense,
-      amount: amount,
-      category: 'Transfer',
-      accountId: from.id,
-      note: note,
-      date: date,
-    ));
-    await txRepo.add(Transaction(
-      id: inId,
-      type: TransactionType.income,
-      amount: amount,
-      category: 'Transfer',
-      accountId: to.id,
-      note: note,
-      date: date,
-    ));
+    // Both sides of the transfer and every wallet balance write it requires
+    // are saved together atomically, so a failure partway through can never
+    // leave only one side of the transfer persisted.
+    await txService.saveTransfer(
+      outTransaction: Transaction(
+        id: outId,
+        type: TransactionType.expense,
+        amount: amount,
+        category: 'Transfer',
+        accountId: from.id,
+        note: note,
+        date: date,
+      ),
+      inTransaction: Transaction(
+        id: inId,
+        type: TransactionType.income,
+        amount: amount,
+        category: 'Transfer',
+        accountId: to.id,
+        note: note,
+        date: date,
+      ),
+      walletUpdates:
+          updates.map((u) => WalletBalanceWrite(u.walletId, u.balance)).toList(),
+    );
     if (mounted) context.pop();
   }
 
