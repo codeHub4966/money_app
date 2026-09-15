@@ -384,6 +384,69 @@ Share Receipt
     });
   });
 
+  group('whitespace-separated ("side-by-side OCR") layout', () {
+    test('Scan and Pay spec example: "Merchant Name AUXIAOYEW" / "Amount RM 0.01"', () {
+      final data = MaybankReceiptParser.parseScanAndPayText('''
+Maybank
+Scan and Pay
+Merchant Name AUXIAOYEW
+Amount RM 0.01
+''');
+
+      expect(data.amount, 0.01);
+      expect(data.merchantName, 'AUXIAOYEW');
+      expect(data.note, 'AUXIAOYEW');
+    });
+
+    test('transfer spec example: Beneficiary Name / Beneficiary Account Number / '
+        'Recipient Reference / Amount all whitespace-separated', () {
+      final data = MaybankReceiptParser.parseDuitNowTransferText('''
+Maybank
+Third Party Transfer
+Beneficiary Name AU XIAO XUAN
+Beneficiary Account Number 158284304009
+Recipient Reference hhhh
+Amount RM 5.20
+''');
+
+      expect(data.amount, 5.20);
+      expect(data.beneficiaryName, 'AU XIAO XUAN');
+      expect(data.beneficiaryAccountNumber, '158284304009');
+      expect(data.recipientReference, 'hhhh');
+      expect(data.note, 'hhhh - AU XIAO XUAN');
+    });
+
+    test('Reference ID reads a whitespace-separated value', () {
+      final data = MaybankReceiptParser.parseScanAndPayText('''
+Maybank
+Scan and Pay
+Reference ID QR83721748
+Merchant Name AUXIAOYEW
+Amount RM 0.01
+''');
+
+      expect(data.referenceId, 'QR83721748');
+      expect(data.merchantName, 'AUXIAOYEW');
+    });
+
+    test('"Third Party Transfer" (no literal "DuitNow Transfer" header) still routes via '
+        'Beneficiary Name field detection', () {
+      final data = MaybankReceiptParser.parse('''
+Maybank
+Third Party Transfer
+Beneficiary Name AU XIAO XUAN
+Beneficiary Account Number 158284304009
+Recipient Reference hhhh
+Amount RM 5.20
+''');
+
+      expect(data, isNotNull);
+      expect(data!.type, MaybankReceiptType.duitNowTransfer);
+      expect(data.amount, 5.20);
+      expect(data.note, 'hhhh - AU XIAO XUAN');
+    });
+  });
+
   group('parse — dispatches to the right receipt-type parser', () {
     test('routes a DuitNow Transfer screen to parseDuitNowTransferText', () {
       final data = MaybankReceiptParser.parse('''

@@ -14,6 +14,9 @@ import '../../../core/services/receipt_file_service.dart';
 import '../../../core/services/receipt_scanner_service.dart';
 import '../../../core/services/receipt_enrichment_service.dart';
 import '../../../core/services/receipt_wallet_matcher.dart';
+import '../../../core/services/tng_receipt_parser.dart';
+import '../../../core/services/public_bank_receipt_parser.dart';
+import '../../../core/services/maybank_receipt_parser.dart';
 import '../../../core/services/merchant_category_history.dart';
 import '../../../core/services/payment_alias_store.dart';
 import '../../providers/app_providers.dart';
@@ -52,6 +55,128 @@ bool isAlreadyPermanentReceiptPath(
 /// place).
 bool shouldDeleteOldReceipt(String? oldPath, String? newPath) =>
     oldPath != null && oldPath != newPath;
+
+/// Whether a just-scanned receipt's OCR text should be routed to
+/// [TngReceiptParser] instead of the generic [ReceiptScannerService]
+/// parser: when [rawText] confidently looks like a Touch 'n Go eWallet
+/// screenshot (see [TngReceiptParser.isTngReceipt]), this parses it there
+/// and returns the result; otherwise returns null so the caller falls back
+/// to the generic parser. Pulled out as a pure function (no ML Kit /
+/// provider dependency), the same way [receiptPermanentPath] etc. are
+/// above, so the routing decision itself can be unit tested directly.
+TngReceiptData? tryParseAsTngReceipt(
+  String rawText, {
+  List<String> existingCategoryLabels = const [],
+}) {
+  if (!TngReceiptParser.isTngReceipt(rawText)) return null;
+  return TngReceiptParser.parse(rawText, existingCategoryLabels: existingCategoryLabels);
+}
+
+/// Resolves the wallet to autofill for a screenshot already identified as
+/// TNG (see [tryParseAsTngReceipt]): prefers a unique existing Touch 'n Go
+/// -named wallet — the screenshot itself is strong evidence once it's been
+/// identified as TNG, regardless of what its OCR text says (see
+/// [ReceiptWalletMatcher.findUniqueTngWallet]) — and falls back to the
+/// generic [ReceiptWalletMatcher.match] logic when there isn't a unique
+/// match, so a wrong wallet is never forced.
+(Wallet?, String) resolveTngWallet({
+  required String rawText,
+  required List<Wallet> wallets,
+  List<Transaction> transactions = const [],
+  Wallet? currentWallet,
+}) {
+  final tngWallet = ReceiptWalletMatcher.findUniqueTngWallet(wallets);
+  if (tngWallet != null) return (tngWallet, 'tng_wallet');
+  return ReceiptWalletMatcher.match(
+    rawText: rawText,
+    wallets: wallets,
+    transactions: transactions,
+    currentWallet: currentWallet,
+  );
+}
+
+/// Whether a just-scanned receipt's OCR text should be routed to
+/// [PublicBankReceiptParser] instead of the generic [ReceiptScannerService]
+/// parser: when [rawText] confidently looks like a Public Bank "Money Sent"/
+/// "Money Paid" transaction-detail screen (see
+/// [PublicBankReceiptParser.looksLikePublicBankReceipt]), this detects which
+/// of the two and parses it there, returning the result; otherwise returns
+/// null so the caller falls back to the next check (Maybank) or ultimately
+/// the generic parser. Pure function (no ML Kit/provider dependency) so the
+/// routing decision itself can be unit tested directly.
+PublicBankReceiptData? tryParseAsPublicBankReceipt(
+  String rawText, {
+  List<String> existingCategoryLabels = const [],
+}) {
+  if (!PublicBankReceiptParser.looksLikePublicBankReceipt(rawText)) return null;
+  return PublicBankReceiptParser.parse(rawText, existingCategoryLabels: existingCategoryLabels);
+}
+
+/// Resolves the wallet to autofill for a screenshot already identified as
+/// Public Bank (see [tryParseAsPublicBankReceipt]): prefers a unique
+/// existing Public Bank-named wallet — the screenshot itself is strong
+/// evidence once it's been identified as Public Bank, regardless of what its
+/// OCR text says (see [ReceiptWalletMatcher.findUniquePublicBankWallet]) —
+/// and falls back to the generic [ReceiptWalletMatcher.match] logic when
+/// there isn't a unique match, so a wrong wallet is never forced.
+(Wallet?, String) resolvePublicBankWallet({
+  required String rawText,
+  required List<Wallet> wallets,
+  List<Transaction> transactions = const [],
+  Wallet? currentWallet,
+}) {
+  final pbWallet = ReceiptWalletMatcher.findUniquePublicBankWallet(wallets);
+  if (pbWallet != null) return (pbWallet, 'public_bank_wallet');
+  return ReceiptWalletMatcher.match(
+    rawText: rawText,
+    wallets: wallets,
+    transactions: transactions,
+    currentWallet: currentWallet,
+  );
+}
+
+/// Whether a just-scanned receipt's OCR text should be routed to
+/// [MaybankReceiptParser] instead of the generic [ReceiptScannerService]
+/// parser: when [rawText] confidently looks like a Maybank transaction-
+/// detail screen (see [MaybankReceiptParser.looksLikeMaybankReceipt]), this
+/// detects the receipt type (Scan and Pay / DuitNow Transfer) and parses it
+/// there, returning the result; otherwise returns null so the caller falls
+/// back to the generic parser. Pure function (no ML Kit/provider
+/// dependency) so the routing decision itself can be unit tested directly.
+MaybankReceiptData? tryParseAsMaybankReceipt(
+  String rawText, {
+  List<String> existingCategoryLabels = const [],
+}) {
+  if (!MaybankReceiptParser.looksLikeMaybankReceipt(rawText)) return null;
+  return MaybankReceiptParser.parse(rawText, existingCategoryLabels: existingCategoryLabels);
+}
+
+/// Resolves the wallet to autofill for a screenshot already identified as
+/// Maybank (see [tryParseAsMaybankReceipt]): prefers a unique existing
+/// Maybank-named wallet — the screenshot itself is strong evidence once it's
+/// been identified as Maybank, regardless of what its OCR text says (see
+/// [ReceiptWalletMatcher.findUniqueMaybankWallet]) — and falls back to the
+/// generic [ReceiptWalletMatcher.match] logic when there isn't a unique
+/// match, so a wrong wallet is never forced. A MAE sub-account wallet is
+/// only ever preferred when [rawText] itself clearly names MAE as the
+/// source/payment context, never merely because the screenshot is
+/// confidently Maybank.
+(Wallet?, String) resolveMaybankWallet({
+  required String rawText,
+  required List<Wallet> wallets,
+  List<Transaction> transactions = const [],
+  Wallet? currentWallet,
+}) {
+  final preferMae = RegExp(r'\bmae\b', caseSensitive: false).hasMatch(rawText);
+  final maybankWallet = ReceiptWalletMatcher.findUniqueMaybankWallet(wallets, preferMae: preferMae);
+  if (maybankWallet != null) return (maybankWallet, 'maybank_wallet');
+  return ReceiptWalletMatcher.match(
+    rawText: rawText,
+    wallets: wallets,
+    transactions: transactions,
+    currentWallet: currentWallet,
+  );
+}
 
 /// A single wallet balance write to apply.
 class WalletBalanceUpdate {
@@ -481,17 +606,72 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
     setState(() => _scanningReceipt = true);
 
     try {
-      final receiptData = await ReceiptScannerService.scanReceipt(pickedFile.path);
+      final rawText = await ReceiptScannerService.scanRawText(pickedFile.path);
 
       final key = _type == TransactionType.income ? 'income' : 'expense';
       final categories = ref.read(categoriesProvider)[key] ?? [];
       final existingLabels = categories.map((c) => c.label).toList();
+      final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
+      final wallets = ref.read(walletsProvider).valueOrNull ?? [];
+      final currentWallet = wallets.where((w) => w.id == _account).firstOrNull;
+
+      // A Touch 'n Go eWallet screenshot is routed to TngReceiptParser
+      // instead of the generic parser below — its layout (labelled fields
+      // like Receiver/Remark/Payment Details) is nothing like a paper
+      // receipt, and TngReceiptParser already knows how to read it. The
+      // generic parser never runs on a screenshot that's routed here, so
+      // its results can never overwrite what TngReceiptParser produced.
+      final tngData = tryParseAsTngReceipt(rawText, existingCategoryLabels: existingLabels);
+      if (tngData != null) {
+        _autofillFromTngReceipt(
+          tngData: tngData,
+          rawText: rawText,
+          imagePath: pickedFile.path,
+          wallets: wallets,
+          transactions: transactions,
+          currentWallet: currentWallet,
+        );
+        return;
+      }
+
+      // A Public Bank "Money Sent"/"Money Paid" transaction-detail
+      // screenshot is likewise routed to PublicBankReceiptParser instead of
+      // the generic parser below — checked before Maybank/generic so its
+      // result is never run through (and so never overwritten by) either.
+      final publicBankData = tryParseAsPublicBankReceipt(rawText, existingCategoryLabels: existingLabels);
+      if (publicBankData != null) {
+        _autofillFromPublicBankReceipt(
+          data: publicBankData,
+          rawText: rawText,
+          imagePath: pickedFile.path,
+          wallets: wallets,
+          transactions: transactions,
+          currentWallet: currentWallet,
+        );
+        return;
+      }
+
+      // A Maybank transaction-detail screenshot (Scan and Pay / DuitNow
+      // Transfer) is routed to MaybankReceiptParser the same way.
+      final maybankData = tryParseAsMaybankReceipt(rawText, existingCategoryLabels: existingLabels);
+      if (maybankData != null) {
+        _autofillFromMaybankReceipt(
+          data: maybankData,
+          rawText: rawText,
+          imagePath: pickedFile.path,
+          wallets: wallets,
+          transactions: transactions,
+          currentWallet: currentWallet,
+        );
+        return;
+      }
+
+      final receiptData = ReceiptScannerService.parseReceiptText(rawText);
 
       // Majority-based merchant history: only trusted as HIGH confidence
       // when backed by enough consistent past transactions (see
       // MerchantCategoryHistory) — a single accidental past category never
       // permanently biases future scans for that merchant.
-      final transactions = ref.read(transactionsProvider).valueOrNull ?? [];
       final merchantHistory = MerchantCategoryHistory.build(transactions);
       final reliableMerchantCategory = receiptData.merchantName != null
           ? MerchantCategoryHistory.dominantCategory(merchantHistory, receiptData.merchantName!)
@@ -504,9 +684,6 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         existingCategoryLabels: existingLabels,
         reliableMerchantCategory: reliableMerchantCategory,
       );
-
-      final wallets = ref.read(walletsProvider).valueOrNull ?? [];
-      final currentWallet = wallets.where((w) => w.id == _account).firstOrNull;
 
       // Learned card/payment alias (e.g. "VISA ****1234" -> a specific
       // previously-confirmed wallet) takes priority over every rule-based
@@ -697,6 +874,219 @@ class _AddTransactionScreenState extends ConsumerState<AddTransactionScreen> {
         );
       }
     }
+  }
+
+  /// Autofills the Add Transaction form from a screenshot [_scanReceipt]
+  /// already confirmed is TNG (via [tryParseAsTngReceipt]) — the TNG
+  /// counterpart to the generic autofill block in [_scanReceipt] above.
+  /// [tngData]'s amount/date/note/category are used exactly as
+  /// TngReceiptParser produced them (never recomputed here), and the
+  /// wallet is resolved by [resolveTngWallet] rather than the generic
+  /// ReceiptWalletMatcher flow. No AI enrichment pass follows — TNG
+  /// screenshots are already fully parsed by a dedicated, structured
+  /// parser, unlike an OCR'd paper receipt.
+  void _autofillFromTngReceipt({
+    required TngReceiptData tngData,
+    required String rawText,
+    required String imagePath,
+    required List<Wallet> wallets,
+    required List<Transaction> transactions,
+    Wallet? currentWallet,
+  }) {
+    final (matchedWallet, walletMatchReason) = resolveTngWallet(
+      rawText: rawText,
+      wallets: wallets,
+      transactions: transactions,
+      currentWallet: currentWallet,
+    );
+
+    if (kDebugMode) {
+      debugPrint('========== RECEIPT OCR (TNG) ==========');
+      debugPrint('Raw OCR:\n$rawText');
+      debugPrint('Format:\n${tngData.format} (${tngData.kind})');
+      debugPrint('Amount:\n${tngData.amount} (${tngData.amountConfidence})');
+      debugPrint('Date:\n${tngData.date} (${tngData.dateConfidence})');
+      debugPrint('Counterparty:\n${tngData.counterpartyName} (${tngData.counterpartyConfidence})');
+      debugPrint('Note:\n${tngData.note}');
+      debugPrint('Category:\n${tngData.category} (${tngData.categoryConfidence})');
+      debugPrint('Matched wallet:\n${matchedWallet?.name} (reason: $walletMatchReason)');
+      debugPrint('========================================');
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _receiptImagePath = imagePath;
+      _receiptPaymentFingerprint = null;
+      _scanningReceipt = false;
+      _lastReceiptData = null;
+      _lastCategoryConfidence = tngData.categoryConfidence;
+
+      if (tngData.amount != null) _amount = tngData.amount!.toStringAsFixed(2);
+      if (tngData.date != null) _date = tngData.date!;
+      if (tngData.note != null && tngData.note!.isNotEmpty) _noteCtrl.text = tngData.note!;
+      if (tngData.category != null) _category = tngData.category!;
+      if (matchedWallet != null) _account = matchedWallet.id;
+    });
+
+    final details = <String>[];
+    if (tngData.amount != null) details.add('RM ${tngData.amount!.toStringAsFixed(2)}');
+    if (tngData.counterpartyName != null) details.add(tngData.counterpartyName!);
+    if (tngData.category != null) details.add(tngData.category!);
+    if (matchedWallet != null) details.add(matchedWallet.name);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          tngData.hasData
+              ? 'TNG receipt scanned: ${details.join(' • ')}'
+              : 'Receipt attached (no data detected)',
+        ),
+        backgroundColor: tngData.hasData ? Colors.green : AppTheme.onSurfaceVariant,
+      ),
+    );
+  }
+
+  /// Autofills the Add Transaction form from a screenshot [_scanReceipt]
+  /// already confirmed is Public Bank (via [tryParseAsPublicBankReceipt]) —
+  /// the Public Bank counterpart to [_autofillFromTngReceipt] above.
+  /// [data]'s amount/date/note/category are used exactly as
+  /// PublicBankReceiptParser produced them (never recomputed here), and the
+  /// wallet is resolved by [resolvePublicBankWallet]. No AI enrichment pass
+  /// follows, for the same reason as TNG: this is already a dedicated,
+  /// structured parser, unlike an OCR'd paper receipt.
+  void _autofillFromPublicBankReceipt({
+    required PublicBankReceiptData data,
+    required String rawText,
+    required String imagePath,
+    required List<Wallet> wallets,
+    required List<Transaction> transactions,
+    Wallet? currentWallet,
+  }) {
+    final (matchedWallet, walletMatchReason) = resolvePublicBankWallet(
+      rawText: rawText,
+      wallets: wallets,
+      transactions: transactions,
+      currentWallet: currentWallet,
+    );
+
+    if (kDebugMode) {
+      debugPrint('========== RECEIPT OCR (Public Bank) ==========');
+      debugPrint('Raw OCR:\n$rawText');
+      debugPrint('Kind:\n${data.kind}');
+      debugPrint('Amount:\n${data.amount} (${data.amountConfidence})');
+      debugPrint('Date:\n${data.date} (${data.dateConfidence})');
+      debugPrint('Recipient:\n${data.recipientAccount ?? data.recipientName} (${data.recipientConfidence})');
+      debugPrint('Note:\n${data.note}');
+      debugPrint('Category:\n${data.category} (${data.categoryConfidence})');
+      debugPrint('Matched wallet:\n${matchedWallet?.name} (reason: $walletMatchReason)');
+      debugPrint('================================================');
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _receiptImagePath = imagePath;
+      _receiptPaymentFingerprint = null;
+      _scanningReceipt = false;
+      _lastReceiptData = null;
+      _lastCategoryConfidence = data.categoryConfidence;
+
+      if (data.amount != null) _amount = data.amount!.toStringAsFixed(2);
+      if (data.date != null) _date = data.date!;
+      if (data.note != null && data.note!.isNotEmpty) _noteCtrl.text = data.note!;
+      if (data.category != null) _category = data.category!;
+      if (matchedWallet != null) _account = matchedWallet.id;
+    });
+
+    final details = <String>[];
+    if (data.amount != null) details.add('RM ${data.amount!.toStringAsFixed(2)}');
+    final counterparty = data.recipientAccount ?? data.recipientName;
+    if (counterparty != null) details.add(counterparty);
+    if (data.category != null) details.add(data.category!);
+    if (matchedWallet != null) details.add(matchedWallet.name);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          data.hasData
+              ? 'Public Bank receipt scanned: ${details.join(' • ')}'
+              : 'Receipt attached (no data detected)',
+        ),
+        backgroundColor: data.hasData ? Colors.green : AppTheme.onSurfaceVariant,
+      ),
+    );
+  }
+
+  /// Autofills the Add Transaction form from a screenshot [_scanReceipt]
+  /// already confirmed is Maybank (via [tryParseAsMaybankReceipt]) — the
+  /// Maybank counterpart to [_autofillFromTngReceipt] above. [data]'s
+  /// amount/date/note/category are used exactly as MaybankReceiptParser
+  /// produced them (never recomputed here), and the wallet is resolved by
+  /// [resolveMaybankWallet]. No AI enrichment pass follows, for the same
+  /// reason as TNG/Public Bank.
+  void _autofillFromMaybankReceipt({
+    required MaybankReceiptData data,
+    required String rawText,
+    required String imagePath,
+    required List<Wallet> wallets,
+    required List<Transaction> transactions,
+    Wallet? currentWallet,
+  }) {
+    final (matchedWallet, walletMatchReason) = resolveMaybankWallet(
+      rawText: rawText,
+      wallets: wallets,
+      transactions: transactions,
+      currentWallet: currentWallet,
+    );
+
+    if (kDebugMode) {
+      debugPrint('========== RECEIPT OCR (Maybank) ==========');
+      debugPrint('Raw OCR:\n$rawText');
+      debugPrint('Type:\n${data.type}');
+      debugPrint('Amount:\n${data.amount} (${data.amountConfidence})');
+      debugPrint('Date:\n${data.date} (${data.dateConfidence})');
+      debugPrint(
+          'Counterparty:\n${data.merchantName ?? data.beneficiaryName} (${data.counterpartyConfidence})');
+      debugPrint('Note:\n${data.note}');
+      debugPrint('Category:\n${data.category} (${data.categoryConfidence})');
+      debugPrint('Matched wallet:\n${matchedWallet?.name} (reason: $walletMatchReason)');
+      debugPrint('============================================');
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _receiptImagePath = imagePath;
+      _receiptPaymentFingerprint = null;
+      _scanningReceipt = false;
+      _lastReceiptData = null;
+      _lastCategoryConfidence = data.categoryConfidence;
+
+      if (data.amount != null) _amount = data.amount!.toStringAsFixed(2);
+      if (data.date != null) _date = data.date!;
+      if (data.note != null && data.note!.isNotEmpty) _noteCtrl.text = data.note!;
+      if (data.category != null) _category = data.category!;
+      if (matchedWallet != null) _account = matchedWallet.id;
+    });
+
+    final details = <String>[];
+    if (data.amount != null) details.add('RM ${data.amount!.toStringAsFixed(2)}');
+    final counterparty = data.merchantName ?? data.beneficiaryName;
+    if (counterparty != null) details.add(counterparty);
+    if (data.category != null) details.add(data.category!);
+    if (matchedWallet != null) details.add(matchedWallet.name);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          data.hasData
+              ? 'Maybank receipt scanned: ${details.join(' • ')}'
+              : 'Receipt attached (no data detected)',
+        ),
+        backgroundColor: data.hasData ? Colors.green : AppTheme.onSurfaceVariant,
+      ),
+    );
   }
 
   /// Explicit, user-initiated full AI verification pass over the already

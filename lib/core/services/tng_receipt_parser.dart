@@ -86,6 +86,25 @@ class TngReceiptParser {
   static const String _merchantWords = r'merchant(?:\s*name)?|paid\s*to|pay\s*to|to';
   static const String _receiverWords = r'receiver(?:\s*name)?|transfer\s*to|to';
 
+  // "Transfer To" excluding the "Transfer to Wallet" VALUE (of the
+  // Transaction Type field) via a negative lookahead. Only needed when
+  // matching with no punctuation separator at all (whitespace-inline /
+  // field-boundary detection) — with a colon/dash to anchor on, a bare
+  // "transfer\s*to" alternative was already safe, since "Transfer to
+  // Wallet" carries no colon/dash right after "to".
+  static const String _transferToWordsSafeForWhitespace = r'transfer\s*to(?!\s*wallet\b)';
+
+  // Same fields as above, but WITHOUT the bare "to" fallback alternative —
+  // used only when matching a whitespace-separated "Label value" line (no
+  // colon/dash between them, see [_inlineWhitespacePattern]). A bare "to"
+  // is far too common a word to safely treat as a field label without an
+  // explicit separator (it would misfire on ordinary sentences); "transfer
+  // to" instead uses the Wallet-safe variant above, for the same reason
+  // [_transferToWordsSafeForWhitespace] itself exists.
+  static const String _merchantWordsStrict = r'merchant(?:\s*name)?|paid\s*to|pay\s*to';
+  static const String _receiverWordsStrict =
+      'receiver(?:\\s*name)?|$_transferToWordsSafeForWhitespace';
+
   // Format B labels. Kept distinct from the Format A alternatives above:
   // Format B's "Merchant" field is always explicitly labelled (unlike
   // Format A's bare "To" fallback), and its "Transfer To" label must NOT
@@ -93,11 +112,31 @@ class TngReceiptParser {
   // field, so no "(?:\s*wallet)?" suffix is added here.
   static const String _transactionTypeWords = r'transaction\s*type';
   static const String _transferToWords = r'transfer\s*to';
+
   static const String _formatBMerchantWords = r'merchant(?:\s*name)?';
   static const String _walletRefWords = r'wallet\s*ref\.?';
   static const String _transactionNoWords = r'transaction\s*no\.?';
   static const String _duitNowRefWords = r'duitnow\s*ref\s*no\.?';
   static const String _statusFieldWords = r'status';
+  static const String _payViaWords = r'pay\s*via';
+
+  // ─────────────────── Screenshot detection labels ───────────────────
+
+  // "Date & Time" / "Date&Time" / "Date / Time" / "Date/Time" — the bare
+  // "date" label alone is NOT included here, since it's far too generic to
+  // count as TNG-specific evidence on its own (see [isTngReceipt]).
+  static const String _dateTimeLabelWords = r'date\s*[/&]\s*time';
+
+  static const String _transferredResultWords = r'transferred|transfer\s*successful';
+  static const String _paymentSuccessfulWords = r'payment\s*successful';
+
+  // TNG brand/product words — distinct from generic payment vocabulary
+  // (payment/merchant/successful/QR/DuitNow) that also appears on ordinary
+  // paper receipts and must never, on its own, imply a TNG screenshot.
+  static final RegExp _tngBrandWordPattern = RegExp(
+    r"touch\s*'?\s*n\s*go|\btng\b|e-?wallet\s*balance",
+    caseSensitive: false,
+  );
 
   // Every label recognised above (plus generic reference/amount/date label
   // words) — used so a labelled value is never mistaken for the next
@@ -111,6 +150,20 @@ class TngReceiptParser {
 
   static final RegExp _anyKnownLabelLine = _standalonePattern(_anyLabelWords);
   static final RegExp _anyLabelInlineLine = _inlinePattern(_anyLabelWords);
+
+  // Same set of labels as [_anyLabelWords], but using the "Strict" merchant/
+  // receiver alternatives (no bare "to") — safe to match with no punctuation
+  // separator at all, unlike [_anyLabelWords] itself. Used only to recognise
+  // a whitespace-separated "Label value" line (e.g. "Remark snacks") as a
+  // field boundary, so it isn't wrongly swallowed as wrapped continuation
+  // text of the *previous* field.
+  static const String _anyLabelWordsStrict =
+      '$_paymentDetailsWords|$_paymentMethodWords|$_remarkWords|$_merchantWordsStrict|$_receiverWordsStrict|'
+      '$_transactionTypeWords|$_transferToWordsSafeForWhitespace|$_walletRefWords|$_transactionNoWords|'
+      '$_duitNowRefWords|$_statusFieldWords|$_payViaWords|'
+      r'reference\s*no\.?|receipt\s*no\.?|amount|' '$_dateTimeLabelWords';
+
+  static final RegExp _anyKnownLabelWhitespaceLine = _inlineWhitespacePattern(_anyLabelWordsStrict);
 
   static final RegExp _statusLinePattern = RegExp(
     r'^(?:payment\s*|transfer\s*)?(?:successful|success|completed|failed|pending|processing)\b',
@@ -137,6 +190,17 @@ class TngReceiptParser {
   // Matches "Label: value" / "Label - value" on a single line.
   static RegExp _inlinePattern(String labelAlternation) {
     return RegExp(r'^(?:' + labelAlternation + r')\s*[:\-]\s*(.+)$', caseSensitive: false);
+  }
+
+  // Matches "Label value" on a single line with no punctuation separator at
+  // all — real screenshots often OCR a side-by-side label/value pair (e.g.
+  // "Receiver" on the left, the name on the right) onto one row with only
+  // whitespace between them. Only used with label alternations specific
+  // enough to safely stand alone without a separator (see the "Strict"
+  // label constants above) — never with an alternation containing the bare
+  // "to" fallback, which would misfire on ordinary sentences.
+  static RegExp _inlineWhitespacePattern(String labelAlternation) {
+    return RegExp(r'^(?:' + labelAlternation + r')\s+(\S.*)$', caseSensitive: false);
   }
 
   // ─────────────────────────── Amount ───────────────────────────
@@ -232,6 +296,7 @@ class TngReceiptParser {
   static bool _isFieldBoundaryLine(String line) {
     return _anyKnownLabelLine.hasMatch(line) ||
         _anyLabelInlineLine.hasMatch(line) ||
+        _anyKnownLabelWhitespaceLine.hasMatch(line) ||
         _statusLinePattern.hasMatch(line) ||
         _amountPattern.hasMatch(line) ||
         _tryParseDateTimeFromLine(line) != null;
@@ -257,9 +322,15 @@ class TngReceiptParser {
   /// wrapped continuation lines when present. Returns null if the field was
   /// printed with nothing under it (the very next line is itself another
   /// known field).
-  static String? _extractLabeledValue(List<String> lines, String labelWords) {
+  static String? _extractLabeledValue(
+    List<String> lines,
+    String labelWords, {
+    bool allowWhitespaceSeparator = false,
+  }) {
     final standalonePattern = _standalonePattern(labelWords);
     final inlinePattern = _inlinePattern(labelWords);
+    final whitespacePattern =
+        allowWhitespaceSeparator ? _inlineWhitespacePattern(labelWords) : null;
 
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i].trim();
@@ -267,6 +338,14 @@ class TngReceiptParser {
       final inlineMatch = inlinePattern.firstMatch(line);
       if (inlineMatch != null) {
         final first = inlineMatch.group(1)!.trim();
+        final parts = <String>[if (first.isNotEmpty) first, ..._collectWrappedContinuation(lines, i + 1)];
+        final value = parts.join(' ').trim();
+        if (value.isNotEmpty) return value;
+      }
+
+      final whitespaceMatch = whitespacePattern?.firstMatch(line);
+      if (whitespaceMatch != null) {
+        final first = whitespaceMatch.group(1)!.trim();
         final parts = <String>[if (first.isNotEmpty) first, ..._collectWrappedContinuation(lines, i + 1)];
         final value = parts.join(' ').trim();
         if (value.isNotEmpty) return value;
@@ -296,15 +375,32 @@ class TngReceiptParser {
   /// Prefers an explicitly labelled value (a real TNG field, e.g. "To" or
   /// "Merchant"); falls back to the first plausible name-like line
   /// otherwise, since the counterparty name is sometimes printed prominently
-  /// with no label at all.
+  /// with no label at all. [whitespaceLabelWords], when given, is tried
+  /// next (a "Strict" label alternation, safe to match with no punctuation
+  /// separator — see [_inlineWhitespacePattern]) so a real screenshot's
+  /// side-by-side "Receiver CHANG NYET CHING" row is recognised even though
+  /// [labelWords] itself may include the bare "to" fallback that can't
+  /// safely be matched without a separator.
   static (String?, FieldConfidence) _extractCounterparty(
     List<String> lines,
     String labelWords,
-    Set<String?> excludeValues,
-  ) {
+    Set<String?> excludeValues, {
+    String? whitespaceLabelWords,
+  }) {
     final labelled = _extractLabeledValue(lines, labelWords);
     if (labelled != null && labelled.isNotEmpty) {
       return (labelled, FieldConfidence.high);
+    }
+
+    if (whitespaceLabelWords != null) {
+      final whitespaceLabelled = _extractLabeledValue(
+        lines,
+        whitespaceLabelWords,
+        allowWhitespaceSeparator: true,
+      );
+      if (whitespaceLabelled != null && whitespaceLabelled.isNotEmpty) {
+        return (whitespaceLabelled, FieldConfidence.high);
+      }
     }
 
     for (final line in lines) {
@@ -345,6 +441,80 @@ class TngReceiptParser {
   /// parsed as a Format A "Paid" / "Transferred" screenshot.
   static bool isTngFormatA(String rawText) => !isTngFormatB(rawText);
 
+  /// True when [rawText] came from a Touch 'n Go eWallet screenshot at all
+  /// — the screen-detection gate a caller should check BEFORE routing to
+  /// [parse]. Unlike [isTngFormatA] (which really only means "not Format B",
+  /// and is only meaningful once the caller already knows the screenshot is
+  /// TNG), this requires multiple pieces of structural evidence from a
+  /// known TNG screen layout — a normal paper receipt that happens to
+  /// mention a generic word like "payment", "merchant", "successful", "QR"
+  /// or "DuitNow" must never be classified as TNG from that word alone.
+  ///
+  /// Recognises three layouts:
+  ///  - Format A "Transferred": `Transferred`/`Transfer Successful` +
+  ///    `Receiver` + (`Remark` or a `Date & Time`/`Date/Time` field).
+  ///  - Format A "Paid": `Payment Successful` + at least two of
+  ///    `Payment Details`, `Payment Method`, `Date & Time`/`Date/Time`.
+  ///  - Format B "Activity/Details": `Transaction Type` + at least two of
+  ///    `Merchant`, `Transfer To`, `Pay Via`, `Payment Details`,
+  ///    `Payment Method`, `Wallet Ref`, `Transaction No`, `DuitNow Ref No`,
+  ///    `Status`.
+  ///
+  /// As a fallback, explicit TNG branding (`Touch 'n Go`, `TNG`, `eWallet
+  /// Balance` — never a generic word) combined with at least two structural
+  /// fields from the lists above is also accepted, for a screenshot whose
+  /// result banner OCR'd differently than expected but unambiguously came
+  /// from the TNG app.
+  static bool isTngReceipt(String rawText) {
+    final lines = _splitLines(rawText);
+    final normalized = rawText.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+    bool hasLabel(String words) => lines.any(
+          (l) =>
+              _standalonePattern(words).hasMatch(l) ||
+              _inlinePattern(words).hasMatch(l) ||
+              _inlineWhitespacePattern(words).hasMatch(l),
+        );
+    bool hasPhrase(String words) => RegExp(words, caseSensitive: false).hasMatch(normalized);
+    int countTrue(List<bool> checks) => checks.where((c) => c).length;
+
+    final hasReceiver = hasLabel(_receiverWordsStrict);
+    final hasDateTime = hasLabel(_dateTimeLabelWords);
+    final hasRemark = hasLabel(_remarkWords);
+    final hasPaymentDetails = hasLabel(_paymentDetailsWords);
+    final hasPaymentMethod = hasLabel(_paymentMethodWords);
+    final hasTransactionType = hasLabel(_transactionTypeWords);
+    final hasMerchant = hasLabel(_formatBMerchantWords);
+    final hasTransferTo = hasLabel(_transferToWordsSafeForWhitespace);
+    final hasPayVia = hasLabel(_payViaWords);
+    final hasWalletRef = hasLabel(_walletRefWords);
+    final hasTransactionNo = hasLabel(_transactionNoWords);
+    final hasDuitNowRef = hasLabel(_duitNowRefWords);
+    final hasStatus = hasLabel(_statusFieldWords);
+
+    final isFormatATransferred =
+        hasPhrase(_transferredResultWords) && hasReceiver && (hasRemark || hasDateTime);
+
+    final formatAPaidFieldCount =
+        countTrue([hasPaymentDetails, hasPaymentMethod, hasDateTime]);
+    final isFormatAPaid = hasPhrase(_paymentSuccessfulWords) && formatAPaidFieldCount >= 2;
+
+    final formatBFieldCount = countTrue([
+      hasMerchant, hasTransferTo, hasPayVia, hasPaymentDetails, hasPaymentMethod,
+      hasWalletRef, hasTransactionNo, hasDuitNowRef, hasStatus,
+    ]);
+    final isFormatB = hasTransactionType && formatBFieldCount >= 2;
+
+    if (isFormatATransferred || isFormatAPaid || isFormatB) return true;
+
+    if (!_tngBrandWordPattern.hasMatch(normalized)) return false;
+    final brandStructuralFieldCount = countTrue([
+      hasReceiver, hasTransactionType, hasRemark, hasPaymentDetails, hasPaymentMethod,
+      hasWalletRef, hasTransactionNo, hasDuitNowRef, hasMerchant, hasTransferTo,
+    ]);
+    return brandStructuralFieldCount >= 2;
+  }
+
   // ─────────────────────────── Format A ───────────────────────────
 
   /// Parses a "TNG Paid" transaction-detail screenshot (a QR/DuitNow
@@ -363,12 +533,15 @@ class TngReceiptParser {
 
     final (amount, amountConfidence) = _extractAmount(lines);
     final (date, dateConfidence) = _extractDateTime(lines);
-    final paymentDetails = _extractLabeledValue(lines, _paymentDetailsWords);
-    final paymentMethod = _extractLabeledValue(lines, _paymentMethodWords);
+    final paymentDetails =
+        _extractLabeledValue(lines, _paymentDetailsWords, allowWhitespaceSeparator: true);
+    final paymentMethod =
+        _extractLabeledValue(lines, _paymentMethodWords, allowWhitespaceSeparator: true);
     final (merchant, merchantConfidence) = _extractCounterparty(
       lines,
       _merchantWords,
       {paymentDetails, paymentMethod},
+      whitespaceLabelWords: _merchantWordsStrict,
     );
 
     String? note;
@@ -426,11 +599,12 @@ class TngReceiptParser {
 
     final (amount, amountConfidence) = _extractAmount(lines);
     final (date, dateConfidence) = _extractDateTime(lines);
-    final remark = _extractLabeledValue(lines, _remarkWords);
+    final remark = _extractLabeledValue(lines, _remarkWords, allowWhitespaceSeparator: true);
     final (receiver, receiverConfidence) = _extractCounterparty(
       lines,
       _receiverWords,
       {remark},
+      whitespaceLabelWords: _receiverWordsStrict,
     );
 
     String? note;
@@ -479,7 +653,10 @@ class TngReceiptParser {
   }) {
     final lines = _splitLines(rawText);
     final hasRemarkLabel = lines.any(
-      (l) => _standalonePattern(_remarkWords).hasMatch(l) || _inlinePattern(_remarkWords).hasMatch(l),
+      (l) =>
+          _standalonePattern(_remarkWords).hasMatch(l) ||
+          _inlinePattern(_remarkWords).hasMatch(l) ||
+          _inlineWhitespacePattern(_remarkWords).hasMatch(l),
     );
     return hasRemarkLabel
         ? parseTransferredText(rawText, existingCategoryLabels: existingCategoryLabels)
@@ -509,9 +686,12 @@ class TngReceiptParser {
 
     final (amount, amountConfidence) = _extractAmount(lines);
     final (date, dateConfidence) = _extractDateTime(lines);
-    final formatBTransactionType = _extractLabeledValue(lines, _transactionTypeWords);
-    final paymentDetails = _extractLabeledValue(lines, _paymentDetailsWords);
-    final paymentMethod = _extractLabeledValue(lines, _paymentMethodWords);
+    final formatBTransactionType =
+        _extractLabeledValue(lines, _transactionTypeWords, allowWhitespaceSeparator: true);
+    final paymentDetails =
+        _extractLabeledValue(lines, _paymentDetailsWords, allowWhitespaceSeparator: true);
+    final paymentMethod =
+        _extractLabeledValue(lines, _paymentMethodWords, allowWhitespaceSeparator: true);
 
     final isTransferToWallet = formatBTransactionType != null &&
         formatBTransactionType.trim().toLowerCase() == 'transfer to wallet';
@@ -520,15 +700,17 @@ class TngReceiptParser {
       formatBTransactionType,
       paymentDetails,
       paymentMethod,
-      _extractLabeledValue(lines, _walletRefWords),
-      _extractLabeledValue(lines, _transactionNoWords),
-      _extractLabeledValue(lines, _duitNowRefWords),
+      _extractLabeledValue(lines, _walletRefWords, allowWhitespaceSeparator: true),
+      _extractLabeledValue(lines, _transactionNoWords, allowWhitespaceSeparator: true),
+      _extractLabeledValue(lines, _duitNowRefWords, allowWhitespaceSeparator: true),
     };
 
     final (counterparty, counterpartyConfidence) = _extractCounterparty(
       lines,
       isTransferToWallet ? _transferToWords : _formatBMerchantWords,
       excludeValues,
+      whitespaceLabelWords:
+          isTransferToWallet ? _transferToWordsSafeForWhitespace : _formatBMerchantWords,
     );
 
     String? note;

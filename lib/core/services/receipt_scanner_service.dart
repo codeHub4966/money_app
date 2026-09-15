@@ -195,13 +195,22 @@ class ReceiptScannerService {
 
   static Future<ReceiptData> scanReceipt(String imagePath) async {
     try {
-      final inputImage = InputImage.fromFilePath(imagePath);
-      final recognizedText = await _textRecognizer.processImage(inputImage);
-      final rawText = _readingOrderText(recognizedText);
+      final rawText = await scanRawText(imagePath);
       return parseReceiptText(rawText);
     } catch (e) {
       return ReceiptData(rawText: '');
     }
+  }
+
+  /// Runs ML Kit OCR over [imagePath] and returns just the recognised text
+  /// — no local parsing. This is the seam a caller uses to decide how to
+  /// route a screenshot (e.g. to [TngReceiptParser] via `isTngReceipt`)
+  /// before running the generic receipt parser, instead of always paying
+  /// for a full [scanReceipt] parse it may end up discarding.
+  static Future<String> scanRawText(String imagePath) async {
+    final inputImage = InputImage.fromFilePath(imagePath);
+    final recognizedText = await _textRecognizer.processImage(inputImage);
+    return _readingOrderText(recognizedText);
   }
 
   /// Runs the local parser over already-recognised OCR text, with no ML Kit

@@ -105,6 +105,7 @@ class MaybankReceiptParser {
 
   static final RegExp _anyKnownLabelLine = _standalonePattern(_anyLabelWords);
   static final RegExp _anyLabelInlineLine = _inlinePattern(_anyLabelWords);
+  static final RegExp _anyKnownLabelWhitespaceLine = _inlineWhitespacePattern(_anyLabelWords);
 
   // Receipt "chrome" that must never be swallowed into a wrapped field value
   // or mistaken for a field of its own: the Share Receipt button, the
@@ -135,12 +136,23 @@ class MaybankReceiptParser {
     return RegExp(r'^(?:' + labelAlternation + r')\s*[:\-]\s*(.+)$', caseSensitive: false);
   }
 
+  // Matches "Label value" with no punctuation separator — real device OCR
+  // commonly merges a side-by-side label/value row onto one line this way
+  // (e.g. "Merchant Name AUXIAOYEW"). Scoped to a single known label
+  // alternation at a time (never a generic "any word(s) then rest of line"
+  // parser), so this can never misread unrelated receipt text as a field.
+  static RegExp _inlineWhitespacePattern(String labelAlternation) {
+    return RegExp(r'^(?:' + labelAlternation + r')\s+(\S.*)$', caseSensitive: false);
+  }
+
   // True for any line that can never be a continuation of the previous
-  // field's (possibly wrapped) value: a known label, inline-labelled,
-  // receipt chrome/noise, an amount, or a date.
+  // field's (possibly wrapped) value: a known label in any of the three
+  // supported layouts (stacked/standalone, "Label: value", or whitespace-
+  // separated "Label value"), receipt chrome/noise, an amount, or a date.
   static bool _isBoundaryLine(String line) {
     return _anyKnownLabelLine.hasMatch(line) ||
         _anyLabelInlineLine.hasMatch(line) ||
+        _anyKnownLabelWhitespaceLine.hasMatch(line) ||
         _noiseLinePattern.hasMatch(line) ||
         _amountPattern.hasMatch(line) ||
         _tryParseDateTimeFromLine(line) != null;
@@ -159,7 +171,10 @@ class MaybankReceiptParser {
 
     final lines = _splitLines(rawText);
     bool hasLabel(String words) => lines.any(
-          (l) => _standalonePattern(words).hasMatch(l) || _inlinePattern(words).hasMatch(l),
+          (l) =>
+              _standalonePattern(words).hasMatch(l) ||
+              _inlinePattern(words).hasMatch(l) ||
+              _inlineWhitespacePattern(words).hasMatch(l),
         );
 
     if (hasLabel(_beneficiaryNameWords)) score += 1;
@@ -181,7 +196,10 @@ class MaybankReceiptParser {
 
     final lines = _splitLines(rawText);
     bool hasLabel(String words) => lines.any(
-          (l) => _standalonePattern(words).hasMatch(l) || _inlinePattern(words).hasMatch(l),
+          (l) =>
+              _standalonePattern(words).hasMatch(l) ||
+              _inlinePattern(words).hasMatch(l) ||
+              _inlineWhitespacePattern(words).hasMatch(l),
         );
 
     final hasBeneficiaryFields = hasLabel(_beneficiaryNameWords) || hasLabel(_receivingBankWords);
@@ -229,6 +247,7 @@ class MaybankReceiptParser {
   static final RegExp _numericDatePattern = RegExp(
     r'(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})'
     r'(?:[,]?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?)?',
+    caseSensitive: false,
   );
 
   static int _to24Hour(int hour, String? ampm) {
@@ -278,14 +297,17 @@ class MaybankReceiptParser {
 
   // ─────────────────────────── Labelled fields ───────────────────────────
 
-  /// Reads a value introduced by [labelWords], either inline on the same
-  /// line ("Label: value") or, as a stacked layout usually OCRs, on the next
-  /// non-empty line below a standalone "Label" line. Stops without a value
-  /// if that next line is itself a boundary line ([_isBoundaryLine]) —
-  /// meaning the field was printed with nothing under it.
+  /// Reads a value introduced by [labelWords]: inline on the same line, as
+  /// either "Label: value" or side-by-side "Label value" (real device OCR
+  /// commonly merges a same-row label/value pair this way), or, as a
+  /// stacked layout usually OCRs, on the next non-empty line below a
+  /// standalone "Label" line. Stops without a value if that next line is
+  /// itself a boundary line ([_isBoundaryLine]) — meaning the field was
+  /// printed with nothing under it.
   static (String?, int?) _extractLabeledValueWithIndex(List<String> lines, String labelWords) {
     final standalonePattern = _standalonePattern(labelWords);
     final inlinePattern = _inlinePattern(labelWords);
+    final whitespacePattern = _inlineWhitespacePattern(labelWords);
 
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i].trim();
@@ -293,6 +315,12 @@ class MaybankReceiptParser {
       final inlineMatch = inlinePattern.firstMatch(line);
       if (inlineMatch != null) {
         final value = inlineMatch.group(1)!.trim();
+        if (value.isNotEmpty) return (value, i);
+      }
+
+      final whitespaceMatch = whitespacePattern.firstMatch(line);
+      if (whitespaceMatch != null) {
+        final value = whitespaceMatch.group(1)!.trim();
         if (value.isNotEmpty) return (value, i);
       }
 

@@ -155,6 +155,65 @@ class ReceiptWalletMatcher {
         }));
   }
 
+  /// Finds a unique existing wallet whose name identifies it as the user's
+  /// Touch 'n Go eWallet (matching name variants such as "TnG", "TNG",
+  /// "Touch n Go", "Touch 'n Go", "Touch & Go", "Touch n Go eWallet" — see
+  /// [eWalletBrands]'s `'touch n go'` entry). Intended for a screenshot
+  /// that has already been confidently identified as a TNG screenshot by
+  /// its own screen layout (see `TngReceiptParser.isTngReceipt`) — the
+  /// screenshot itself is then strong wallet evidence on its own, so this
+  /// deliberately does NOT require the OCR text to literally contain
+  /// "Touch 'n Go" anywhere, unlike [match] below. Returns null when there
+  /// isn't exactly one such wallet, so callers fall back to [match] instead
+  /// of forcing the wrong account.
+  static Wallet? findUniqueTngWallet(List<Wallet> wallets) {
+    return _uniqueOrNull(
+      wallets.where((w) => _containsAny(_normalize(w.name), eWalletBrands['touch n go']!)),
+    );
+  }
+
+  /// Finds a unique existing wallet whose name identifies it as the user's
+  /// Public Bank account (matching name variants such as "Public Bank",
+  /// "PBB", "Public Bank Account" — see [bankBrands]'s `'public bank'`
+  /// entry). Intended for a screenshot already confidently identified as a
+  /// Public Bank transaction-detail screen by its own screen layout (see
+  /// `PublicBankReceiptParser.looksLikePublicBankReceipt`) — the screenshot
+  /// itself is then strong wallet evidence on its own, so this deliberately
+  /// does NOT require the OCR text to literally contain "Public Bank"
+  /// anywhere, unlike [match] below. Returns null when there isn't exactly
+  /// one such wallet, so callers fall back to [match] instead of forcing the
+  /// wrong account.
+  static Wallet? findUniquePublicBankWallet(List<Wallet> wallets) {
+    return _uniqueOrNull(
+      wallets.where((w) => _containsAny(_normalize(w.name), bankBrands['public bank']!)),
+    );
+  }
+
+  /// Finds a unique existing wallet whose name identifies it as the user's
+  /// Maybank account (matching name variants such as "Maybank", "MBB" — see
+  /// [bankBrands]'s `'maybank'` entry). Intended for a screenshot already
+  /// confidently identified as a Maybank transaction-detail screen (see
+  /// `MaybankReceiptParser.looksLikeMaybankReceipt`) — the screenshot itself
+  /// is then strong wallet evidence on its own, so this does NOT require the
+  /// OCR text to literally contain "Maybank" anywhere, unlike [match] below.
+  ///
+  /// A wallet named "MAE" is Maybank's separate e-wallet sub-account, not the
+  /// main bank account, so it is only ever preferred when [preferMae] is
+  /// true — the caller should only pass true when the parsed receipt's own
+  /// source/payment context clearly indicates MAE, never merely because the
+  /// screenshot is confidently Maybank. Returns null when there isn't
+  /// exactly one matching wallet, so callers fall back to [match] instead of
+  /// forcing the wrong account.
+  static Wallet? findUniqueMaybankWallet(List<Wallet> wallets, {bool preferMae = false}) {
+    if (preferMae) {
+      final maeWallet = _uniqueOrNull(wallets.where((w) => _containsAny(_normalize(w.name), eWalletBrands['mae']!)));
+      if (maeWallet != null) return maeWallet;
+    }
+    return _uniqueOrNull(
+      wallets.where((w) => _containsAny(_normalize(w.name), bankBrands['maybank']!)),
+    );
+  }
+
   /// Resolves a receipt to a wallet, plus the reason the choice was made
   /// (one of: `explicit_wallet`, `cash_fallback`, `card_fallback`,
   /// `ewallet_fallback`, `others_fallback`, `preserve_current`, or `none`).

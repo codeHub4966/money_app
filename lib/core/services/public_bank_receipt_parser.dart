@@ -107,6 +107,8 @@ class PublicBankReceiptParser {
       '$_transferMethodWords|$_paymentMethodWords|$_duitNowRefNoWords|$_duitNowStatusCodeWords|amount';
 
   static final RegExp _anyKnownLabelLine = _standalonePattern(_anyLabelWords);
+  static final RegExp _anyLabelInlineLine = _inlinePattern(_anyLabelWords);
+  static final RegExp _anyKnownLabelWhitespaceLine = _inlineWhitespacePattern(_anyLabelWords);
 
   // Matches a line that consists ONLY of the label (e.g. "Recipient
   // Reference" or "Recipient Reference:") — the Public Bank app's stacked
@@ -118,6 +120,27 @@ class PublicBankReceiptParser {
   // Matches "Label: value" / "Label - value" on a single line.
   static RegExp _inlinePattern(String labelAlternation) {
     return RegExp(r'^(?:' + labelAlternation + r')\s*[:\-]\s*(.+)$', caseSensitive: false);
+  }
+
+  // Matches "Label value" with no punctuation separator — real device OCR
+  // commonly merges a side-by-side label/value row onto one line this way
+  // (e.g. "Recipient Reference rice"). Scoped to a single known label
+  // alternation at a time (never a generic "any word(s) then rest of line"
+  // parser), so this can never misread unrelated receipt text as a field.
+  static RegExp _inlineWhitespacePattern(String labelAlternation) {
+    return RegExp(r'^(?:' + labelAlternation + r')\s+(\S.*)$', caseSensitive: false);
+  }
+
+  // True for any line that can never be a continuation of the previous
+  // field's (possibly wrapped) value: a known label in any of the three
+  // supported layouts (stacked/standalone, "Label: value", or whitespace-
+  // separated "Label value"), an amount, or a date/time.
+  static bool _isBoundaryLine(String line) {
+    return _anyKnownLabelLine.hasMatch(line) ||
+        _anyLabelInlineLine.hasMatch(line) ||
+        _anyKnownLabelWhitespaceLine.hasMatch(line) ||
+        _amountPattern.hasMatch(line) ||
+        _tryParseDateTimeFromLine(line) != null;
   }
 
   // ─────────────────────────── Detection ───────────────────────────
@@ -192,6 +215,7 @@ class PublicBankReceiptParser {
   static final RegExp _numericDatePattern = RegExp(
     r'(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})'
     r'(?:[,]?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?)?',
+    caseSensitive: false,
   );
 
   static int _to24Hour(int hour, String? ampm) {
@@ -241,14 +265,17 @@ class PublicBankReceiptParser {
 
   // ─────────────────────────── Labelled fields ───────────────────────────
 
-  /// Reads a value introduced by [labelWords], either inline on the same
-  /// line ("Label: value") or, as the Public Bank app's stacked layout
-  /// usually OCRs, on the next non-empty line below a standalone "Label"
-  /// line. Stops without a value if that next line is itself another known
-  /// label — meaning the field was printed with nothing under it.
+  /// Reads a value introduced by [labelWords]: inline on the same line, as
+  /// either "Label: value" or side-by-side "Label value" (real device OCR
+  /// commonly merges a same-row label/value pair this way), or, as the
+  /// Public Bank app's stacked layout usually OCRs, on the next non-empty
+  /// line below a standalone "Label" line. Stops without a value if that
+  /// next line is itself a boundary line ([_isBoundaryLine]) — meaning the
+  /// field was printed with nothing under it.
   static (String?, int?) _extractLabeledValueWithIndex(List<String> lines, String labelWords) {
     final standalonePattern = _standalonePattern(labelWords);
     final inlinePattern = _inlinePattern(labelWords);
+    final whitespacePattern = _inlineWhitespacePattern(labelWords);
 
     for (var i = 0; i < lines.length; i++) {
       final line = lines[i].trim();
@@ -259,11 +286,17 @@ class PublicBankReceiptParser {
         if (value.isNotEmpty) return (value, i);
       }
 
+      final whitespaceMatch = whitespacePattern.firstMatch(line);
+      if (whitespaceMatch != null) {
+        final value = whitespaceMatch.group(1)!.trim();
+        if (value.isNotEmpty) return (value, i);
+      }
+
       if (standalonePattern.hasMatch(line)) {
         for (var j = i + 1; j < lines.length; j++) {
           final next = lines[j].trim();
           if (next.isEmpty) continue;
-          if (_anyKnownLabelLine.hasMatch(next)) return (null, null);
+          if (_isBoundaryLine(next)) return (null, null);
           return (next, j);
         }
       }
@@ -291,7 +324,7 @@ class PublicBankReceiptParser {
     for (var j = index + 1; j < lines.length && joined < maxJoinLines; j++) {
       final next = lines[j].trim();
       if (next.isEmpty) continue;
-      if (_anyKnownLabelLine.hasMatch(next)) break;
+      if (_isBoundaryLine(next)) break;
       parts.add(next);
       joined++;
     }
@@ -300,6 +333,55 @@ class PublicBankReceiptParser {
 
   static List<String> _splitLines(String rawText) {
     return rawText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+  }
+
+  // ─────────────────────────── Kind detection ───────────────────────────
+
+  /// Detects whether [rawText] is a "Money Sent" (DuitNow/bank transfer) or
+  /// "Money Paid" (merchant/biller payment) Public Bank screen, preferring
+  /// an explicit "Money Sent" / "Money Paid" header when present and
+  /// otherwise falling back to which fields were actually printed. Returns
+  /// null when neither can be determined — callers must not guess.
+  static PublicBankTransactionKind? detectTransactionKind(String rawText) {
+    if (_moneySentPattern.hasMatch(rawText)) return PublicBankTransactionKind.moneySent;
+    if (_moneyPaidPattern.hasMatch(rawText)) return PublicBankTransactionKind.moneyPaid;
+
+    final lines = _splitLines(rawText);
+    bool hasLabel(String words) => lines.any(
+          (l) =>
+              _standalonePattern(words).hasMatch(l) ||
+              _inlinePattern(words).hasMatch(l) ||
+              _inlineWhitespacePattern(words).hasMatch(l),
+        );
+
+    // "Recipient Account" and "Transfer Method" only ever appear on a Money
+    // Sent screen; "Recipient Name" and "Payment Method" only ever appear on
+    // a Money Paid screen — these are mutually exclusive by field, unlike
+    // "Recipient's Bank"/"Reference No." which both screens can print.
+    final hasMoneySentFields = hasLabel(_recipientAccountWords) || hasLabel(_transferMethodWords);
+    final hasMoneyPaidFields = hasLabel(_recipientNameWords) || hasLabel(_paymentMethodWords);
+
+    if (hasMoneySentFields && !hasMoneyPaidFields) return PublicBankTransactionKind.moneySent;
+    if (hasMoneyPaidFields && !hasMoneySentFields) return PublicBankTransactionKind.moneyPaid;
+    return null;
+  }
+
+  /// Detects which [PublicBankTransactionKind] [rawText] came from and
+  /// routes to the matching parser ([parseMoneySentText] /
+  /// [parseMoneyPaidText]). Returns null when the kind could not be
+  /// determined.
+  static PublicBankReceiptData? parse(
+    String rawText, {
+    List<String> existingCategoryLabels = const [],
+  }) {
+    switch (detectTransactionKind(rawText)) {
+      case PublicBankTransactionKind.moneySent:
+        return parseMoneySentText(rawText, existingCategoryLabels: existingCategoryLabels);
+      case PublicBankTransactionKind.moneyPaid:
+        return parseMoneyPaidText(rawText, existingCategoryLabels: existingCategoryLabels);
+      case null:
+        return null;
+    }
   }
 
   // ─────────────────────────── Public API ───────────────────────────

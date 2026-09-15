@@ -296,4 +296,206 @@ void main() {
       expect(resolvedWallet.name, 'Maybank');
     });
   });
+
+  group('findUniqueTngWallet — TNG screenshot wallet resolution', () {
+    test('matches without the OCR text ever containing "Touch \'n Go"', () {
+      final wallets = [
+        _wallet('tng-1', 'TnG Account', WalletType.eWallet),
+        _wallet('bank-1', 'Maybank', WalletType.bank),
+      ];
+      final wallet = ReceiptWalletMatcher.findUniqueTngWallet(wallets);
+      expect(wallet?.id, 'tng-1');
+    });
+
+    for (final name in ['TnG', 'TNG', 'Touch n Go', "Touch 'n Go", 'Touch & Go', 'Touch n Go eWallet']) {
+      test('matches wallet name variant "$name"', () {
+        final wallets = [
+          _wallet('tng-1', name, WalletType.eWallet),
+          _wallet('other-1', 'GrabPay', WalletType.eWallet),
+        ];
+        final wallet = ReceiptWalletMatcher.findUniqueTngWallet(wallets);
+        expect(wallet?.id, 'tng-1');
+      });
+    }
+
+    test('returns null (safe fallback) when there is no TNG-named wallet at all', () {
+      final wallets = [
+        _wallet('bank-1', 'Maybank', WalletType.bank),
+        _wallet('ewallet-1', 'GrabPay', WalletType.eWallet),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueTngWallet(wallets), isNull);
+    });
+
+    test('returns null (ambiguous) rather than guessing when more than one wallet matches', () {
+      final wallets = [
+        _wallet('tng-1', 'TNG', WalletType.eWallet),
+        _wallet('tng-2', "Touch 'n Go", WalletType.eWallet),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueTngWallet(wallets), isNull);
+    });
+  });
+
+  group('resolveTngWallet-style usage: unique TNG wallet beats the generic matcher', () {
+    test('a unique TNG-named wallet is preferred even when the OCR text names another brand', () {
+      final wallets = [
+        _wallet('tng-1', 'TnG Account', WalletType.eWallet),
+        _wallet('bank-1', 'Maybank', WalletType.bank),
+      ];
+      final tngWallet = ReceiptWalletMatcher.findUniqueTngWallet(wallets);
+      expect(tngWallet?.id, 'tng-1');
+
+      // The generic matcher, if consulted instead, would pick differently —
+      // demonstrating why a caller must check findUniqueTngWallet first for
+      // a screenshot already confirmed to be TNG.
+      final (genericWallet, genericReason) = ReceiptWalletMatcher.match(
+        rawText: 'MAYBANK VISA',
+        wallets: wallets,
+      );
+      expect(genericWallet?.id, 'bank-1');
+      expect(genericReason, 'explicit_wallet');
+    });
+
+    test('falls back to the generic matcher when no unique TNG wallet exists', () {
+      final wallets = [
+        _wallet('bank-1', 'Maybank', WalletType.bank),
+        _wallet('card-1', 'My Debit Card', WalletType.card),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueTngWallet(wallets), isNull);
+
+      final (fallbackWallet, reason) = ReceiptWalletMatcher.match(
+        rawText: 'RM 0.02\nTransferred\nReceiver CHANG NYET CHING',
+        wallets: wallets,
+        currentWallet: wallets.first,
+      );
+      // No reliable clue in that text, and no "others" wallet exists either
+      // — the safe fallback preserves whatever was already selected rather
+      // than forcing the wrong account.
+      expect(fallbackWallet, wallets.first);
+      expect(reason, 'preserve_current');
+    });
+  });
+
+  group('findUniquePublicBankWallet — Public Bank screenshot wallet resolution', () {
+    for (final name in ['Public Bank', 'PBB', 'Public Bank Account']) {
+      test('matches wallet name variant "$name"', () {
+        final wallets = [
+          _wallet('pbb-1', name, WalletType.bank),
+          _wallet('other-1', 'Maybank', WalletType.bank),
+        ];
+        final wallet = ReceiptWalletMatcher.findUniquePublicBankWallet(wallets);
+        expect(wallet?.id, 'pbb-1');
+      });
+    }
+
+    test('matches without the OCR text ever containing "Public Bank"', () {
+      final wallets = [
+        _wallet('pbb-1', 'PBB', WalletType.bank),
+        _wallet('other-1', 'Maybank', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniquePublicBankWallet(wallets)?.id, 'pbb-1');
+    });
+
+    test('returns null (safe fallback) when there is no Public Bank-named wallet at all', () {
+      final wallets = [_wallet('bank-1', 'Maybank', WalletType.bank)];
+      expect(ReceiptWalletMatcher.findUniquePublicBankWallet(wallets), isNull);
+    });
+
+    test('returns null (ambiguous) rather than guessing when more than one wallet matches', () {
+      final wallets = [
+        _wallet('pbb-1', 'Public Bank', WalletType.bank),
+        _wallet('pbb-2', 'PBB Savings', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniquePublicBankWallet(wallets), isNull);
+    });
+  });
+
+  group('resolvePublicBankWallet-style usage: unique Public Bank wallet beats the generic matcher', () {
+    test('a unique Public Bank wallet is preferred even when the OCR text names another brand', () {
+      final wallets = [
+        _wallet('pbb-1', 'Public Bank', WalletType.bank),
+        _wallet('bank-1', 'Maybank', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniquePublicBankWallet(wallets)?.id, 'pbb-1');
+    });
+
+    test('falls back to the generic matcher when no matching Public Bank wallet exists', () {
+      final wallets = [_wallet('bank-1', 'Maybank', WalletType.bank)];
+      expect(ReceiptWalletMatcher.findUniquePublicBankWallet(wallets), isNull);
+
+      final (fallbackWallet, reason) = ReceiptWalletMatcher.match(
+        rawText: 'MAYBANK VISA',
+        wallets: wallets,
+      );
+      expect(fallbackWallet?.id, 'bank-1');
+      expect(reason, 'explicit_wallet');
+    });
+  });
+
+  group('findUniqueMaybankWallet — Maybank screenshot wallet resolution', () {
+    for (final name in ['Maybank', 'MBB']) {
+      test('matches wallet name variant "$name"', () {
+        final wallets = [
+          _wallet('mbb-1', name, WalletType.bank),
+          _wallet('other-1', 'Public Bank', WalletType.bank),
+        ];
+        final wallet = ReceiptWalletMatcher.findUniqueMaybankWallet(wallets);
+        expect(wallet?.id, 'mbb-1');
+      });
+    }
+
+    test('does NOT match a "MAE" wallet by default, even though it is a Maybank sub-account', () {
+      final wallets = [
+        _wallet('mae-1', 'MAE', WalletType.eWallet),
+        _wallet('bank-1', 'Public Bank', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueMaybankWallet(wallets), isNull);
+    });
+
+    test('matches a "MAE" wallet only when preferMae is true', () {
+      final wallets = [
+        _wallet('mae-1', 'MAE', WalletType.eWallet),
+        _wallet('mbb-1', 'Maybank', WalletType.bank),
+      ];
+      final withoutPreference = ReceiptWalletMatcher.findUniqueMaybankWallet(wallets);
+      expect(withoutPreference?.id, 'mbb-1');
+
+      final withPreference = ReceiptWalletMatcher.findUniqueMaybankWallet(wallets, preferMae: true);
+      expect(withPreference?.id, 'mae-1');
+    });
+
+    test('returns null (safe fallback) when there is no matching wallet at all', () {
+      final wallets = [_wallet('bank-1', 'Public Bank', WalletType.bank)];
+      expect(ReceiptWalletMatcher.findUniqueMaybankWallet(wallets), isNull);
+    });
+
+    test('returns null (ambiguous) rather than guessing when more than one Maybank wallet matches', () {
+      final wallets = [
+        _wallet('mbb-1', 'Maybank', WalletType.bank),
+        _wallet('mbb-2', 'Maybank Savings', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueMaybankWallet(wallets), isNull);
+    });
+  });
+
+  group('resolveMaybankWallet-style usage: unique Maybank wallet beats the generic matcher', () {
+    test('a unique Maybank wallet is preferred even when the OCR text names another brand', () {
+      final wallets = [
+        _wallet('mbb-1', 'Maybank', WalletType.bank),
+        _wallet('bank-1', 'Public Bank', WalletType.bank),
+      ];
+      expect(ReceiptWalletMatcher.findUniqueMaybankWallet(wallets)?.id, 'mbb-1');
+    });
+
+    test('falls back to the generic matcher when no matching Maybank wallet exists', () {
+      final wallets = [_wallet('bank-1', 'Public Bank', WalletType.bank)];
+      expect(ReceiptWalletMatcher.findUniqueMaybankWallet(wallets), isNull);
+
+      final (fallbackWallet, reason) = ReceiptWalletMatcher.match(
+        rawText: 'PUBLIC BANK',
+        wallets: wallets,
+      );
+      expect(fallbackWallet?.id, 'bank-1');
+      expect(reason, 'explicit_wallet');
+    });
+  });
 }

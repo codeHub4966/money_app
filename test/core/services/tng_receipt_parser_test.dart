@@ -483,4 +483,132 @@ Date/Time
       expect(routedB.note, 'Payment - Sushi Mentai Kampar');
     });
   });
+
+  group('isTngReceipt — screenshot detection', () {
+    test('Format A Transferred screenshot is detected as TNG', () {
+      final rawText = '''
+RM 0.02
+Transferred
+Receiver CHANG NYET CHING
+Remark snacks
+Date & Time 14/09/2026 17:20:36
+''';
+      expect(TngReceiptParser.isTngReceipt(rawText), isTrue);
+    });
+
+    test('Format A Transferred screenshot ("Transfer Successful" wording) is detected as TNG', () {
+      final rawText = '''
+Transfer Successful
+RM 30.00
+Receiver
+CHANG NYET CHING
+15 Sep 2026, 2:35 PM
+Remark
+Fund Transfer
+''';
+      expect(TngReceiptParser.isTngReceipt(rawText), isTrue);
+    });
+
+    test('Format A Paid screenshot is detected as TNG', () {
+      final rawText = '''
+Payment Successful
+RM 12.50
+AU XIAO YEW
+15 Sep 2026, 2:32 PM
+Payment Details
+fruit
+Payment Method
+Touch 'n Go eWallet
+''';
+      expect(TngReceiptParser.isTngReceipt(rawText), isTrue);
+    });
+
+    test('Format B Activity/Details screenshot is detected as TNG', () {
+      final rawText = '''
+Activity
+Details
+-RM19.50
+Successful
+Transaction Type
+Payment
+Merchant
+Sushi Mentai Kampar
+Payment Details
+Payment - Sushi Mentai Kampar
+Payment Method
+Touch 'n Go eWallet
+Date/Time
+05/09/2026 17:29:48
+Wallet Ref
+WR20260906091500987
+Transaction No.
+2609051729481234567
+''';
+      expect(TngReceiptParser.isTngReceipt(rawText), isTrue);
+    });
+
+    test('a normal paper receipt is not falsely detected as TNG', () {
+      final rawText = '''
+99 Speed Mart
+Jalan Test 123, Petaling Jaya
+Milk 5.00
+Bread 3.20
+Eggs 2.50
+SUBTOTAL 10.70
+SST 0.50
+TOTAL 11.20
+Payment
+DuitNow QR
+Merchant Copy
+CASH 20.00
+CHANGE 8.80
+Thank You
+''';
+      expect(TngReceiptParser.isTngReceipt(rawText), isFalse);
+    });
+
+    test('single generic keywords do not trigger TNG detection', () {
+      for (final rawText in [
+        'Payment',
+        'Merchant',
+        'Successful',
+        'QR',
+        'DuitNow',
+        'A DuitNow QR payment was made successfully at the merchant.',
+      ]) {
+        expect(TngReceiptParser.isTngReceipt(rawText), isFalse, reason: rawText);
+      }
+    });
+
+    test('isTngFormatA alone is not treated as proof of a TNG screenshot', () {
+      // isTngFormatA() only means "not Format B" — a completely unrelated
+      // block of text (no TNG structure at all) still satisfies it, but
+      // must never be classified as TNG by isTngReceipt.
+      const rawText = 'Just some random unrelated text with no TNG structure.';
+      expect(TngReceiptParser.isTngFormatA(rawText), isTrue);
+      expect(TngReceiptParser.isTngReceipt(rawText), isFalse);
+    });
+  });
+
+  group('whitespace-separated ("side-by-side OCR") layout', () {
+    test('Receiver / Remark / Date & Time parse correctly with no punctuation separator', () {
+      final rawText = '''
+RM 0.02
+Transferred
+Receiver CHANG NYET CHING
+Remark snacks
+Date & Time 14/09/2026 17:20:36
+''';
+      final data = TngReceiptParser.parse(rawText, existingCategoryLabels: ['Snacks']);
+
+      expect(data.format, TngFormat.a);
+      expect(data.kind, TngTransactionKind.transferred);
+      expect(data.amount, 0.02);
+      expect(data.counterpartyName, 'CHANG NYET CHING');
+      expect(data.remark, 'snacks');
+      expect(data.date, DateTime(2026, 9, 14, 17, 20, 36));
+      expect(data.note, 'snacks - Transfer to CHANG NYET CHING');
+      expect(data.category, 'Snacks');
+    });
+  });
 }
